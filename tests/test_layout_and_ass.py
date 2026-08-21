@@ -1,0 +1,158 @@
+from danmukuflow.core.time import format_ass_time
+from danmukuflow.models import Danmaku, DanmakuType, RenderConfig
+from danmukuflow.renderers.ass import escape_text, render_ass, render_ass_document
+
+
+def make_danmaku(timeline_s, content="a", mode=DanmakuType.FLOAT, rgb=(1, 2, 3)):
+    return Danmaku(
+        timeline_s=timeline_s,
+        content=content,
+        type=mode,
+        fontsize=25,
+        rgb=rgb,
+    )
+
+
+def test_danmaku_length_matches_rust_integer_arithmetic():
+    config = RenderConfig(font_size=25, width_ratio=1.2)
+    assert make_danmaku(0, "ab\u4f60").length(config) == 69.6
+
+
+def test_ass_time_format():
+    assert format_ass_time(0.0) == "0:00:00.00"
+    assert format_ass_time(1.0) == "0:00:01.00"
+    assert format_ass_time(60.0) == "0:01:00.00"
+    assert format_ass_time(3600.0) == "1:00:00.00"
+    assert format_ass_time(3661.5) == "1:01:01.50"
+    assert format_ass_time(3601.01234) == "1:00:01.01"
+
+
+def test_escape_text_trims_and_replaces_newlines_only():
+    assert escape_text("  line1\nline2  ") == "line1\\Nline2"
+    assert escape_text("{raw}\\tag") == "{raw}\\tag"
+
+
+def test_render_ass_header_styles_dialogue_color_and_top_as_float():
+    config = RenderConfig(
+        width=100,
+        height=64,
+        font="TestFont",
+        font_size=25,
+        width_ratio=1.0,
+        lane_size=32,
+        float_percentage=1.0,
+        duration=10.0,
+        alpha=0.7,
+        bold=True,
+        outline=1.5,
+    )
+    danmaku = make_danmaku(
+        1.25,
+        "  line1\nline2  ",
+        mode=DanmakuType.TOP,
+        rgb=(0x11, 0x22, 0x33),
+    )
+
+    ass = render_ass([danmaku], "demo", config)
+
+    assert "Title: demo" in ass
+    assert "PlayResX: 100" in ass
+    assert "PlayResY: 64" in ass
+    assert "Style: Float,TestFont,25,&H4cFFFFFF" in ass
+    assert "Style: Bottom,TestFont,25,&H4cFFFFFF" in ass
+    assert "Style: Top,TestFont,25,&H4cFFFFFF" in ass
+    assert ",1, 0, 0, 0, 100, 100" in ass
+    assert "\\move(100, 0," in ass
+    assert "\\c&H332211&" in ass
+    assert "line1\\Nline2" in ass
+    assert ",Float,," in ass
+
+
+def test_render_sorts_applies_time_offset_and_denylist():
+    config = RenderConfig(
+        width=100,
+        height=64,
+        lane_size=32,
+        float_percentage=1.0,
+        duration=10,
+        time_offset=1.0,
+        denylist=("deny",),
+    )
+    danmakus = [
+        make_danmaku(2, "second"),
+        make_danmaku(1, "first"),
+        make_danmaku(0.5, "deny me"),
+        make_danmaku(-2, "negative"),
+    ]
+
+    result = render_ass_document(danmakus, "demo", config)
+    first = result.content.index("first")
+    second = result.content.index("second")
+
+    assert result.parsed_count == 4
+    assert result.rendered_count == 2
+    assert result.skipped_count == 2
+    assert first < second
+    assert "Dialogue: 2,0:00:02.00" in result.content
+
+
+def test_layout_delays_when_collision_can_be_resolved():
+    config = RenderConfig(
+        width=100,
+        height=100,
+        lane_size=100,
+        float_percentage=1.0,
+        duration=10,
+        width_ratio=1.0,
+        horizontal_gap=20,
+    )
+    result = render_ass_document(
+        [make_danmaku(0, "a"), make_danmaku(3, "a")],
+        "demo",
+        config,
+    )
+
+    assert result.rendered_count == 2
+    assert "Dialogue: 2,0:00:03.11" in result.content
+
+
+def test_layout_skips_when_collision_delay_is_too_large():
+    config = RenderConfig(
+        width=100,
+        height=100,
+        lane_size=100,
+        float_percentage=1.0,
+        duration=10,
+        width_ratio=1.0,
+        horizontal_gap=20,
+    )
+    result = render_ass_document(
+        [make_danmaku(0, "a"), make_danmaku(1, "a")],
+        "demo",
+        config,
+    )
+
+    assert result.rendered_count == 1
+    assert result.skipped_count == 1
+
+
+def test_no_lanes_skips_all_danmaku():
+    config = RenderConfig(height=10, lane_size=32, float_percentage=0.5)
+    result = render_ass_document([make_danmaku(0)], "demo", config)
+
+    assert result.rendered_count == 0
+    assert result.skipped_count == 1
+
+
+def test_reverse_and_bottom_render_as_float():
+    config = RenderConfig(width=100, height=100, lane_size=50, float_percentage=1.0)
+    danmakus = [
+        make_danmaku(0, "bottom", DanmakuType.BOTTOM),
+        make_danmaku(20, "reverse", DanmakuType.REVERSE),
+    ]
+
+    ass = render_ass(danmakus, "demo", config)
+
+    assert ass.count(",Float,,") == 2
+    assert "bottom" in ass
+    assert "reverse" in ass
