@@ -1,6 +1,6 @@
 import pytest
 
-from danmukuflow.models import BVSource, RenderConfig, XMLSource
+from danmukuflow.models import RenderConfig, SeasonSource, XMLSource
 from danmukuflow.services import (
     DanmakuContentError,
     ExportRequest,
@@ -114,4 +114,9 @@ def test_export_service_maps_output_write_failure(tmp_path):
 
 def test_export_service_rejects_reserved_sources():
     with pytest.raises(UnsupportedSourceError):
-        ExportService().export(ExportRequest(source=BVSource("BV1xx411c7mD")))
+        ExportService().export(ExportRequest(source=object()))
+
+
+def test_export_service_rejects_season_export():
+    with pytest.raises(UnsupportedSourceError):
+        ExportService().export(ExportRequest(source=SeasonSource(123)))

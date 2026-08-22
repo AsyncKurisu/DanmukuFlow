@@ -1,8 +1,8 @@
 import inspect
 
 import danmukuflow.cli as cli
-from danmukuflow.models import XMLSource
-from danmukuflow.services import ExportRequest, ExportService
+from danmukuflow.models import BVSource, XMLSource
+from danmukuflow.services import ExportRequest, ExportResult, ExportService
 
 
 def write_xml(path, content="hello"):
@@ -93,3 +93,45 @@ def test_cli_does_not_import_parser_renderer_or_layout_modules():
     assert "danmukuflow.parsers" not in source
     assert "danmukuflow.renderers" not in source
     assert "danmukuflow.core" not in source
+
+
+def test_cli_builds_bv_request_with_page_and_output(monkeypatch, tmp_path, capsys):
+    captured = {}
+
+    class FakeExportService:
+        def export(self, request):
+            captured["request"] = request
+            return ExportResult(
+                success=True,
+                output_path=tmp_path / "result.ass",
+                danmaku_count=2,
+                metadata={"source_type": "bv"},
+            )
+
+    monkeypatch.setattr(cli, "ExportService", FakeExportService)
+
+    exit_code = cli.main(
+        [
+            "convert",
+            "BV1z44y1E7m6",
+            "--page",
+            "2",
+            "--output",
+            str(tmp_path / "result.ass"),
+        ]
+    )
+
+    captured_output = capsys.readouterr()
+    assert exit_code == 0
+    assert isinstance(captured["request"].source, BVSource)
+    assert captured["request"].source.page == 2
+    assert captured["request"].output_path == tmp_path / "result.ass"
+    assert "Converted 2 danmaku" in captured_output.out
+
+
+def test_cli_reports_ss_export_is_not_supported(capsys):
+    exit_code = cli.main(["convert", "ss123"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "season parsing only" in captured.err

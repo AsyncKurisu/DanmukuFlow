@@ -28,3 +28,51 @@ class RenderError(ExportError):
 
 class UnsupportedSourceError(ExportError):
     pass
+
+
+class InvalidBilibiliIdentifierError(ExportError):
+    pass
+
+
+class BilibiliNetworkError(ExportError):
+    pass
+
+
+class BilibiliTimeoutError(BilibiliNetworkError):
+    pass
+
+
+class BilibiliHttpError(ExportError):
+    pass
+
+
+class BilibiliApiError(ExportError):
+    pass
+
+
+class BilibiliDataError(ExportError):
+    pass
+
+
+class BilibiliDecodeError(ExportError):
+    pass
+
+
+class VideoNotFoundError(BilibiliApiError):
+    pass
+
+
+class PageNotFoundError(ExportError):
+    pass
+
+
+class SeasonNotFoundError(BilibiliApiError):
+    pass
+
+
+class EpisodeNotFoundError(BilibiliApiError):
+    pass
+
+
+class SeasonExportUnsupportedError(UnsupportedSourceError):
+    pass

@@ -2,11 +2,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from danmukuflow.models import RenderConfig, XMLSource
+from danmukuflow import source_from_input
+from danmukuflow.models import BVSource, RenderConfig
 from danmukuflow.services import (
     ExportError,
     ExportRequest,
     ExportService,
+    InvalidBilibiliIdentifierError,
     InputNotFoundError,
     InvalidXmlError,
     OutputDirectoryError,
@@ -27,20 +29,25 @@ def main(argv=None):
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        prog="danmu2ass",
-        description="Convert Bilibili XML danmaku files to ASS subtitles.",
+        prog="danmukuflow",
+        description="Convert Bilibili XML, BV, or episode danmaku to ASS subtitles.",
     )
     subparsers = parser.add_subparsers(dest="command")
 
     convert = subparsers.add_parser(
         "convert",
-        help="convert one local XML danmaku file to ASS",
+        help="convert one XML, BV, or episode source to ASS",
     )
-    convert.add_argument("input", help="input XML file")
+    convert.add_argument("input", help="XML path, BV/ss/ep id, or Bilibili URL")
     convert.add_argument(
         "--output",
         "-o",
-        help="output ASS file, defaults to the input filename with .ass extension",
+        help="output ASS file, defaults to a source-based filename",
+    )
+    convert.add_argument(
+        "--page",
+        type=int,
+        help="BV video page to export (defaults to 1)",
     )
     convert.set_defaults(handler=_handle_convert)
 
@@ -48,13 +55,17 @@ def build_parser():
 
 
 def _handle_convert(args):
-    request = ExportRequest(
-        source=XMLSource(Path(args.input)),
-        output_path=Path(args.output) if args.output else None,
-        render_config=RenderConfig(),
-    )
-
     try:
+        source = source_from_input(args.input, page=args.page)
+        if args.page is not None and not isinstance(source, BVSource):
+            raise InvalidBilibiliIdentifierError(
+                "--page is only valid for BV video input"
+            )
+        request = ExportRequest(
+            source=source,
+            output_path=Path(args.output) if args.output else None,
+            render_config=RenderConfig(),
+        )
         result = ExportService().export(request)
     except ExportError as exc:
         print(_format_error(exc), file=sys.stderr)
@@ -81,6 +92,8 @@ def _format_error(error):
         return "error: output directory error: {}".format(error)
     if isinstance(error, OutputWriteError):
         return "error: output write error: {}".format(error)
+    if isinstance(error, InvalidBilibiliIdentifierError):
+        return "error: invalid Bilibili input: {}".format(error)
     return "error: {}".format(error)
 
 

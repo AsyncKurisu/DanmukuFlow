@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -10,6 +11,7 @@ class XMLSource:
 @dataclass(frozen=True)
 class BVSource:
     bv: str
+    page: int = 1
 
 
 @dataclass(frozen=True)
@@ -20,3 +22,10 @@ class SeasonSource:
 @dataclass(frozen=True)
 class EpisodeSource:
     episode_id: int
+
+
+@dataclass(frozen=True)
+class BilibiliIdentifier:
+    kind: str
+    value: object
+    page: Optional[int] = None
