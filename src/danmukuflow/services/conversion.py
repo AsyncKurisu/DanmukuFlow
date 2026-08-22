@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from danmukuflow.models import RenderConfig
-from danmukuflow.parsers import parse_xml
+from danmukuflow.parsers.bilibili_xml import parse_xml
 from danmukuflow.renderers.ass import render_ass_document
 
 

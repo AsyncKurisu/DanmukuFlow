@@ -1,12 +1,16 @@
 # DanmukuFlow
 
-DanmukuFlow converts Bilibili XML danmaku files to ASS subtitles.
+DanmukuFlow converts Bilibili XML, BV video, and episode danmaku to ASS
+subtitles. All sources use the same internal danmaku model and ASS renderer.
 
 ## CLI
 
 ```bash
-danmu2ass convert input.xml
-danmu2ass convert input.xml --output ./output/result.ass
+danmukuflow convert input.xml
+danmukuflow convert input.xml --output ./output/result.ass
+danmukuflow convert BV1z44y1E7m6 --page 2 --output ./output/result.ass
+danmukuflow convert ep473502 --output ./output/result.ass
+danmukuflow convert ss28296
 ```
 
 ## Python API
@@ -26,6 +30,7 @@ result = ExportService().export(
 print(result.output_path)
 ```
 
-This project currently supports local XML input only. BV, season, episode,
-network fetching, batch downloading, and Web UI integration are intentionally
-not implemented yet.
+`BV` and `ep` inputs fetch details and segmented danmaku data from Bilibili
+before rendering. `ss` inputs currently resolve season data only and return a
+clear unsupported-export error; batch downloading and Web UI integration are
+outside this release.

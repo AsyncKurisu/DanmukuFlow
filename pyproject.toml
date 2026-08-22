@@ -12,10 +12,13 @@ license = { file = "LICENSE" }
 authors = [
     { name = "DanmukuFlow contributors" }
 ]
-dependencies = []
+dependencies = [
+    "httpx>=0.24",
+    "protobuf>=4.21",
+]
 
 [project.scripts]
-danmu2ass = "danmukuflow.cli:main"
+danmukuflow = "danmukuflow.cli:main"
 
 [project.optional-dependencies]
 dev = [
