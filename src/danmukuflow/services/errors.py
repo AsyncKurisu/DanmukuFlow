@@ -76,3 +76,39 @@ class EpisodeNotFoundError(BilibiliApiError):
 
 class SeasonExportUnsupportedError(UnsupportedSourceError):
     pass
+
+
+class BatchExportError(ExportError):
+    pass
+
+
+class VideoDirectoryNotFoundError(BatchExportError):
+    pass
+
+
+class VideoDirectoryNotDirectoryError(BatchExportError):
+    pass
+
+
+class VideoDirectoryAccessError(BatchExportError):
+    pass
+
+
+class NoVideoFilesError(BatchExportError):
+    pass
+
+
+class SeasonEpisodeNumberError(BatchExportError):
+    pass
+
+
+class InvalidEpisodeSelectionError(BatchExportError):
+    pass
+
+
+class InvalidBatchConcurrencyError(BatchExportError):
+    pass
+
+
+class InvalidBatchConflictPolicyError(BatchExportError):
+    pass

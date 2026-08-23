@@ -221,7 +221,7 @@ def test_bilibili_service_resolves_season_source():
                                 "aid": 21,
                                 "bvid": "BV2",
                                 "cid": 31,
-                                "title": "Episode",
+                                "title": "2",
                                 "long_title": "Long",
                                 "duration": 130000,
                             }
@@ -238,6 +238,7 @@ def test_bilibili_service_resolves_season_source():
     assert season.season_id == 88
     assert len(season.episodes) == 1
     assert season.episodes[0].episode_id == 20
+    assert season.episodes[0].display_number == 2
     assert transport.calls[0]["params"] == {"season_id": 88}
 
 

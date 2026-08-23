@@ -5,9 +5,11 @@ from pathlib import Path
 from danmukuflow.bilibili.service import BilibiliService
 from danmukuflow.models import (
     BVSource,
+    Episode,
     EpisodeSource,
     RenderConfig,
     SeasonSource,
+    Season,
     XMLSource,
 )
 from danmukuflow.parsers.bilibili_xml import DanmakuParseError
@@ -159,18 +161,32 @@ class ExportService:
 
     def _export_episode(self, request):
         season, episode = self.bilibili_service.resolve_episode(request.source)
-        fetch = self._fetch_danmaku(episode.cid, episode.duration_s)
-        episode_title = episode.title or episode.long_title or str(episode.episode_id)
-        title = "{} - {}".format(season.title, episode_title)
         output_path = self._resolve_network_output_path(
             request.output_path,
-            title,
+            self._episode_title(season, episode),
         )
+        return self.export_resolved_episode(
+            season,
+            episode,
+            output_path,
+            request.render_config,
+        )
+
+    def export_resolved_episode(
+        self,
+        season: Season,
+        episode: Episode,
+        output_path,
+        config=None,
+    ):
+        title = self._episode_title(season, episode)
+        fetch = self._fetch_danmaku(episode.cid, episode.duration_s)
         metadata = {
             "source_type": "ep",
             "title": title,
             "season_id": season.season_id,
             "episode_id": episode.episode_id,
+            "display_number": episode.display_number,
             "bvid": episode.bvid,
             "cid": episode.cid,
             "page": None,
@@ -178,10 +194,15 @@ class ExportService:
         return self._render_network_result(
             fetch,
             title=title,
-            output_path=output_path,
-            config=request.render_config,
+            output_path=Path(output_path),
+            config=config or RenderConfig(),
             metadata=metadata,
         )
+
+    @staticmethod
+    def _episode_title(season, episode):
+        episode_title = episode.title or episode.long_title or str(episode.episode_id)
+        return "{} - {}".format(season.title, episode_title)
 
     def _fetch_danmaku(self, cid, duration_s):
         fetch_with_stats = getattr(
@@ -256,7 +277,7 @@ class ExportService:
     def _resolve_network_output_path(self, output_path, title):
         if output_path is not None:
             return Path(output_path)
-        return Path(_safe_filename(title) + ".ass")
+        return Path(safe_filename(title) + ".ass")
 
     def _ensure_output_directory(self, output_path):
         parent = output_path.parent
@@ -270,8 +291,11 @@ class ExportService:
             ) from exc
 
 
-def _safe_filename(value):
+def safe_filename(value):
     value = str(value).strip()
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value)
     value = re.sub(r"\s+", " ", value).strip(" .")
     return value or "danmaku"
+
+
+_safe_filename = safe_filename

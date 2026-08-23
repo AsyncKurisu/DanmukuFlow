@@ -1,7 +1,16 @@
 import inspect
+from pathlib import Path
 
 import danmukuflow.cli as cli
-from danmukuflow.models import BVSource, XMLSource
+from danmukuflow.models import (
+    BVSource,
+    BatchExportItem,
+    BatchExportResult,
+    BatchItemStatus,
+    ConflictPolicy,
+    SeasonSource,
+    XMLSource,
+)
 from danmukuflow.services import ExportRequest, ExportResult, ExportService
 
 
@@ -135,3 +144,119 @@ def test_cli_reports_ss_export_is_not_supported(capsys):
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "season parsing only" in captured.err
+
+
+def test_cli_batch_builds_request_and_reports_summary(
+    monkeypatch, tmp_path, capsys
+):
+    captured = {}
+
+    class FakeBatchExportService:
+        def export(self, request):
+            captured["request"] = request
+            return BatchExportResult(
+                total=3,
+                matched=2,
+                selected=2,
+                succeeded=1,
+                failed=0,
+                skipped=1,
+                unmatched_local=1,
+                unmatched_episode=0,
+                ambiguous=0,
+            )
+
+    monkeypatch.setattr(cli, "BatchExportService", FakeBatchExportService)
+
+    exit_code = cli.main(
+        [
+            "batch",
+            "ss123",
+            "--video-dir",
+            str(tmp_path),
+            "--episodes",
+            "1,3-5,8",
+            "--concurrency",
+            "2",
+            "--overwrite",
+        ]
+    )
+
+    captured_output = capsys.readouterr()
+    request = captured["request"]
+    assert exit_code == 0
+    assert request.source == SeasonSource(123)
+    assert request.video_dir == tmp_path
+    assert request.episodes == "1,3-5,8"
+    assert request.concurrency == 2
+    assert request.conflict_policy is ConflictPolicy.OVERWRITE
+    assert "succeeded=1" in captured_output.out
+    assert "skipped=1" in captured_output.out
+
+
+def test_cli_batch_returns_nonzero_for_episode_failure(
+    monkeypatch, tmp_path, capsys
+):
+    class FakeBatchExportService:
+        def export(self, request):
+            return BatchExportResult(
+                total=1,
+                matched=1,
+                selected=1,
+                succeeded=0,
+                failed=1,
+                skipped=0,
+                unmatched_local=0,
+                unmatched_episode=0,
+                ambiguous=0,
+                items=(
+                    BatchExportItem(
+                        episode_id=456,
+                        display_number=2,
+                        episode_title="2",
+                        local_video_path=tmp_path / "[02].mkv",
+                        output_path=tmp_path / "[02].ass",
+                        status=BatchItemStatus.FAILED,
+                        error=RuntimeError("download failed"),
+                    ),
+                ),
+            )
+
+    monkeypatch.setattr(cli, "BatchExportService", FakeBatchExportService)
+
+    exit_code = cli.main(
+        ["batch", "ss123", "--video-dir", str(tmp_path)]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "failed=1" in captured.out
+    assert "Failed episode 2" in captured.err
+
+
+def test_cli_batch_defaults_video_directory_to_current_directory(
+    monkeypatch, tmp_path, capsys
+):
+    captured = {}
+
+    class FakeBatchExportService:
+        def export(self, request):
+            captured["request"] = request
+            return BatchExportResult(
+                total=0,
+                matched=0,
+                selected=0,
+                succeeded=0,
+                failed=0,
+                skipped=0,
+                unmatched_local=0,
+                unmatched_episode=0,
+                ambiguous=0,
+            )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "BatchExportService", FakeBatchExportService)
+
+    assert cli.main(["batch", "ss123"]) == 0
+    capsys.readouterr()
+    assert captured["request"].video_dir == Path(".")
