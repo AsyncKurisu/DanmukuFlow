@@ -170,12 +170,16 @@ def _require_success(payload, key, allow_data=False, not_found_error=None):
 
 def _parse_episode(item):
     duration = float(item.get("duration") or 0)
+    title = str(item.get("title") or "")
+    display_number = (
+        int(title) if title.isascii() and title.isdigit() else None
+    )
     return Episode(
         episode_id=int(item["id"]),
         aid=int(item.get("aid") or 0),
         bvid=str(item.get("bvid") or ""),
         cid=int(item["cid"]),
-        title=str(item.get("title") or ""),
+        title=title,
         long_title=str(item.get("long_title") or ""),
         duration_s=duration / 1000.0,
         metadata={
@@ -183,6 +187,7 @@ def _parse_episode(item):
             for key, value in item.items()
             if key not in ("id", "aid", "bvid", "cid", "title", "long_title", "duration")
         },
+        display_number=display_number,
     )
 
 

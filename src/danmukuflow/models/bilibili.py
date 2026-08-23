@@ -27,6 +27,7 @@ class Episode:
     long_title: str
     duration_s: float
     metadata: Dict[str, Any] = field(default_factory=dict)
+    display_number: Optional[int] = None
 
 
 @dataclass(frozen=True)
