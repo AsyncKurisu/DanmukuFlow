@@ -1,55 +1,64 @@
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 from danmukuflow.bilibili.service import BilibiliService
 from danmukuflow.models import (
     BVSource,
     Episode,
     EpisodeSource,
+    OutputArtifact,
+    OutputConfig,
+    OutputMode,
     RenderConfig,
-    SeasonSource,
     Season,
+    SeasonSource,
+    TemplateContext,
     XMLSource,
 )
-from danmukuflow.parsers.bilibili_xml import DanmakuParseError
+from danmukuflow.parsers.bilibili_xml import DanmakuParseError, parse_xml
 from danmukuflow.renderers.ass import render_ass_document
-from danmukuflow.services.conversion import convert_xml_to_ass
 from danmukuflow.services.errors import (
     DanmakuContentError,
     ExportError,
     InputNotFoundError,
     InvalidXmlError,
+    OutputConflictError,
     OutputDirectoryError,
+    OutputPathEscapeError,
     OutputWriteError,
     PageNotFoundError,
     RenderError,
     SeasonExportUnsupportedError,
     UnsupportedSourceError,
 )
+from danmukuflow.services.output import OutputService, safe_filename as _safe_filename
 
 
 @dataclass(frozen=True)
 class ExportRequest:
     source: object
     output_path: object = None
+    output_config: OutputConfig = None
     render_config: RenderConfig = field(default_factory=RenderConfig)
-    force: bool = False
 
 
 @dataclass(frozen=True)
 class ExportResult:
     success: bool
-    output_path: Path
+    output_path: Optional[Path]
     danmaku_count: int
     metadata: dict
+    artifact: Optional[OutputArtifact] = None
+    skipped: bool = False
 
 
 class ExportService:
-    def __init__(self, bilibili_service=None):
+    def __init__(self, bilibili_service=None, output_service=None):
         self.bilibili_service = (
             bilibili_service if bilibili_service is not None else BilibiliService()
         )
+        self.output_service = output_service or OutputService()
 
     def export(self, request):
         if isinstance(request.source, XMLSource):
@@ -69,6 +78,52 @@ class ExportService:
             )
         )
 
+    def export_resolved_episode(
+        self,
+        season: Season,
+        episode: Episode,
+        output_path,
+        config=None,
+        output_config=None,
+    ):
+        config = config or RenderConfig()
+        title = self._episode_title(season, episode)
+        fetch = self._fetch_danmaku(episode.cid, episode.duration_s)
+        rendered = render_ass_document(fetch.danmakus, title, config)
+        metadata = {
+            "source_type": "ep",
+            "title": title,
+            "season_id": season.season_id,
+            "episode_id": episode.episode_id,
+            "display_number": episode.display_number,
+            "bvid": episode.bvid,
+            "cid": episode.cid,
+            "page": None,
+            "parsed_count": rendered.parsed_count,
+            "rendered_count": rendered.rendered_count,
+            "skipped_count": rendered.skipped_count + fetch.skipped_count,
+            "segment_count": fetch.segment_count,
+            "skipped_due_to_newer_output": False,
+        }
+        artifact, output_path, skipped = self._materialize_rendered(
+            rendered.content,
+            title=title,
+            output_path=output_path,
+            output_config=output_config,
+            default_root=Path(output_path).parent if output_path is not None else None,
+            default_template="{season_title} - {episode_title}.ass",
+            context=self._episode_context(season, episode),
+            metadata=metadata,
+        )
+        return ExportResult(
+            success=True,
+            output_path=output_path,
+            danmaku_count=rendered.rendered_count,
+            metadata=metadata,
+            artifact=artifact,
+            skipped=skipped,
+        )
+
     def _export_xml(self, request):
         input_path = Path(request.source.path)
         if not input_path.exists():
@@ -76,53 +131,73 @@ class ExportService:
         if not input_path.is_file():
             raise InputNotFoundError("input path is not a file: {}".format(input_path))
 
-        output_path = self._resolve_output_path(input_path, request.output_path)
-        self._ensure_output_directory(output_path)
+        context = TemplateContext(input_stem=input_path.stem, source_type="xml")
+        metadata = {
+            "source_type": "xml",
+            "input_path": input_path,
+            "title": input_path.stem,
+            "parsed_count": 0,
+            "rendered_count": 0,
+            "skipped_count": 0,
+            "segment_count": 0,
+            "skipped_due_to_newer_output": False,
+        }
+        skipped_artifact = self._preview_skip(
+            request.output_path,
+            request.output_config,
+            context=context,
+            default_root=input_path.parent,
+            default_template="{input_stem}.ass",
+            metadata=metadata,
+        )
+        if skipped_artifact is not None:
+            return ExportResult(
+                success=True,
+                output_path=skipped_artifact.path,
+                danmaku_count=0,
+                metadata={**metadata, "skipped_due_to_existing_output": True},
+                artifact=skipped_artifact,
+                skipped=True,
+            )
 
         try:
-            conversion = convert_xml_to_ass(
-                input_path,
-                output_path,
-                request.render_config,
-                force=request.force,
-            )
+            danmakus = parse_xml(input_path)
+            rendered = render_ass_document(danmakus, input_path.stem, request.render_config)
         except DanmakuParseError as exc:
             if str(exc).startswith("XML file parse error"):
                 raise InvalidXmlError("invalid XML file: {}".format(input_path)) from exc
             raise DanmakuContentError(
                 "danmaku content could not be parsed: {}".format(input_path)
             ) from exc
-        except IsADirectoryError as exc:
-            raise OutputWriteError(
-                "output path is a directory: {}".format(output_path)
-            ) from exc
-        except PermissionError as exc:
-            raise OutputWriteError(
-                "output file is not writable: {}".format(output_path)
-            ) from exc
-        except OSError as exc:
-            raise OutputWriteError(
-                "output file could not be written: {}".format(output_path)
-            ) from exc
         except ExportError:
             raise
         except Exception as exc:
             raise RenderError("rendering failed for {}".format(input_path)) from exc
 
+        metadata.update(
+            {
+                "parsed_count": rendered.parsed_count,
+                "rendered_count": rendered.rendered_count,
+                "skipped_count": rendered.skipped_count,
+            }
+        )
+        artifact, output_path, skipped = self._materialize_rendered(
+            rendered.content,
+            title=input_path.stem,
+            output_path=request.output_path,
+            output_config=request.output_config,
+            default_root=input_path.parent,
+            default_template="{input_stem}.ass",
+            context=context,
+            metadata=metadata,
+        )
         return ExportResult(
             success=True,
-            output_path=conversion.output_path,
-            danmaku_count=conversion.rendered_count,
-            metadata={
-                "source_type": "xml",
-                "input_path": conversion.input_path,
-                "title": input_path.stem,
-                "parsed_count": conversion.parsed_count,
-                "rendered_count": conversion.rendered_count,
-                "skipped_count": conversion.skipped_count,
-                "segment_count": 0,
-                "skipped_due_to_newer_output": conversion.skipped_due_to_newer_output,
-            },
+            output_path=output_path,
+            danmaku_count=rendered.rendered_count,
+            metadata=metadata,
+            artifact=artifact,
+            skipped=skipped,
         )
 
     def _export_bv(self, request):
@@ -139,10 +214,13 @@ class ExportService:
                 )
             )
 
-        fetch = self._fetch_danmaku(page.cid, page.duration_s)
-        output_path = self._resolve_network_output_path(
-            request.output_path,
-            video.title,
+        context = TemplateContext(
+            video_title=video.title,
+            bvid=video.bvid,
+            page=page.page,
+            part=page.part,
+            cid=page.cid,
+            source_type="bv",
         )
         metadata = {
             "source_type": "bv",
@@ -150,37 +228,65 @@ class ExportService:
             "bvid": video.bvid,
             "cid": page.cid,
             "page": page.page,
+            "part": page.part,
+            "parsed_count": 0,
+            "rendered_count": 0,
+            "skipped_count": 0,
+            "segment_count": 0,
+            "skipped_due_to_newer_output": False,
         }
-        return self._render_network_result(
-            fetch,
-            title=video.title,
-            output_path=output_path,
-            config=request.render_config,
+        skipped_artifact = self._preview_skip(
+            request.output_path,
+            request.output_config,
+            context=context,
+            default_root=Path.cwd(),
+            default_template="{video_title}.ass",
             metadata=metadata,
+        )
+        if skipped_artifact is not None:
+            return ExportResult(
+                success=True,
+                output_path=skipped_artifact.path,
+                danmaku_count=0,
+                metadata={**metadata, "skipped_due_to_existing_output": True},
+                artifact=skipped_artifact,
+                skipped=True,
+            )
+
+        fetch = self._fetch_danmaku(page.cid, page.duration_s)
+        title = video.title
+        rendered = render_ass_document(fetch.danmakus, title, request.render_config)
+        metadata.update(
+            {
+                "parsed_count": rendered.parsed_count,
+                "rendered_count": rendered.rendered_count,
+                "skipped_count": rendered.skipped_count + fetch.skipped_count,
+                "segment_count": fetch.segment_count,
+            }
+        )
+        artifact, output_path, skipped = self._materialize_rendered(
+            rendered.content,
+            title=title,
+            output_path=request.output_path,
+            output_config=request.output_config,
+            default_root=Path.cwd(),
+            default_template="{video_title}.ass",
+            context=context,
+            metadata=metadata,
+        )
+        return ExportResult(
+            success=True,
+            output_path=output_path,
+            danmaku_count=rendered.rendered_count,
+            metadata=metadata,
+            artifact=artifact,
+            skipped=skipped,
         )
 
     def _export_episode(self, request):
         season, episode = self.bilibili_service.resolve_episode(request.source)
-        output_path = self._resolve_network_output_path(
-            request.output_path,
-            self._episode_title(season, episode),
-        )
-        return self.export_resolved_episode(
-            season,
-            episode,
-            output_path,
-            request.render_config,
-        )
-
-    def export_resolved_episode(
-        self,
-        season: Season,
-        episode: Episode,
-        output_path,
-        config=None,
-    ):
         title = self._episode_title(season, episode)
-        fetch = self._fetch_danmaku(episode.cid, episode.duration_s)
+        context = self._episode_context(season, episode)
         metadata = {
             "source_type": "ep",
             "title": title,
@@ -190,19 +296,144 @@ class ExportService:
             "bvid": episode.bvid,
             "cid": episode.cid,
             "page": None,
+            "parsed_count": 0,
+            "rendered_count": 0,
+            "skipped_count": 0,
+            "segment_count": 0,
+            "skipped_due_to_newer_output": False,
         }
-        return self._render_network_result(
-            fetch,
-            title=title,
-            output_path=Path(output_path),
-            config=config or RenderConfig(),
+        skipped_artifact = self._preview_skip(
+            request.output_path,
+            request.output_config,
+            context=context,
+            default_root=Path.cwd(),
+            default_template="{season_title} - {episode_title}.ass",
             metadata=metadata,
         )
+        if skipped_artifact is not None:
+            return ExportResult(
+                success=True,
+                output_path=skipped_artifact.path,
+                danmaku_count=0,
+                metadata={**metadata, "skipped_due_to_existing_output": True},
+                artifact=skipped_artifact,
+                skipped=True,
+            )
 
-    @staticmethod
-    def _episode_title(season, episode):
-        episode_title = episode.title or episode.long_title or str(episode.episode_id)
-        return "{} - {}".format(season.title, episode_title)
+        fetch = self._fetch_danmaku(episode.cid, episode.duration_s)
+        rendered = render_ass_document(fetch.danmakus, title, request.render_config)
+        metadata.update(
+            {
+                "parsed_count": rendered.parsed_count,
+                "rendered_count": rendered.rendered_count,
+                "skipped_count": rendered.skipped_count + fetch.skipped_count,
+                "segment_count": fetch.segment_count,
+            }
+        )
+        artifact, output_path, skipped = self._materialize_rendered(
+            rendered.content,
+            title=title,
+            output_path=request.output_path,
+            output_config=request.output_config,
+            default_root=Path.cwd(),
+            default_template="{season_title} - {episode_title}.ass",
+            context=self._episode_context(season, episode),
+            metadata=metadata,
+        )
+        return ExportResult(
+            success=True,
+            output_path=output_path,
+            danmaku_count=rendered.rendered_count,
+            metadata=metadata,
+            artifact=artifact,
+            skipped=skipped,
+        )
+
+    def _materialize_rendered(
+        self,
+        content,
+        *,
+        title,
+        output_path,
+        output_config,
+        default_root,
+        default_template,
+        context,
+        metadata,
+    ):
+        output_config = output_config or OutputConfig()
+        if output_path is not None:
+            path = Path(output_path)
+            if output_config.mode is OutputMode.DOWNLOAD:
+                output_config = OutputConfig(
+                    output_dir=path.parent,
+                    naming_template=path.name,
+                    organization_mode=output_config.organization_mode,
+                    conflict_policy=output_config.conflict_policy,
+                    mode=OutputMode.DIRECTORY,
+                    allowed_output_roots=output_config.allowed_output_roots,
+                )
+            try:
+                artifact = self.output_service.materialize_text(
+                    content,
+                    output_config=output_config,
+                    context=context,
+                    default_template=default_template,
+                    default_root=path.parent,
+                    explicit_path=path,
+                    metadata=metadata,
+                )
+            except OutputPathEscapeError:
+                raise
+            except OutputConflictError:
+                raise
+            except OutputDirectoryError:
+                raise
+            except OutputWriteError:
+                raise
+            return artifact, path, artifact.skipped
+
+        if output_config.mode is OutputMode.DOWNLOAD:
+            artifact = self.output_service.materialize_text(
+                content,
+                output_config=output_config,
+                context=context,
+                default_template=default_template,
+                default_root=default_root,
+                metadata=metadata,
+            )
+            return artifact, None, artifact.skipped
+
+        artifact = self.output_service.materialize_text(
+            content,
+            output_config=output_config,
+            context=context,
+            default_template=default_template,
+            default_root=default_root,
+            metadata=metadata,
+        )
+        return artifact, artifact.path, artifact.skipped
+
+    def _preview_skip(
+        self,
+        output_path,
+        output_config,
+        *,
+        context,
+        default_root,
+        default_template,
+        metadata,
+    ):
+        if output_path is None and (output_config is None or output_config.mode is OutputMode.DOWNLOAD):
+            return None
+        return self.output_service.preview_conflict(
+            output_config=output_config,
+            context=context,
+            default_template=default_template,
+            default_root=default_root,
+            explicit_path=Path(output_path) if output_path is not None else None,
+            metadata=metadata,
+        )
 
     def _fetch_danmaku(self, cid, duration_s):
         fetch_with_stats = getattr(
@@ -222,80 +453,26 @@ class ExportService:
             skipped_count=0,
         )
 
-    def _render_network_result(
-        self,
-        fetch,
-        title,
-        output_path,
-        config,
-        metadata,
-    ):
-        self._ensure_output_directory(output_path)
-        try:
-            rendered = render_ass_document(fetch.danmakus, title, config)
-            with output_path.open("w", encoding="utf-8", newline="\n") as handle:
-                handle.write(rendered.content)
-        except IsADirectoryError as exc:
-            raise OutputWriteError(
-                "output path is a directory: {}".format(output_path)
-            ) from exc
-        except PermissionError as exc:
-            raise OutputWriteError(
-                "output file is not writable: {}".format(output_path)
-            ) from exc
-        except OSError as exc:
-            raise OutputWriteError(
-                "output file could not be written: {}".format(output_path)
-            ) from exc
-        except ExportError:
-            raise
-        except Exception as exc:
-            raise RenderError("rendering failed for {}".format(title)) from exc
-
-        metadata = dict(metadata)
-        metadata.update(
-            {
-                "parsed_count": rendered.parsed_count,
-                "rendered_count": rendered.rendered_count,
-                "skipped_count": rendered.skipped_count + fetch.skipped_count,
-                "segment_count": fetch.segment_count,
-                "skipped_due_to_newer_output": False,
-            }
-        )
-        return ExportResult(
-            success=True,
-            output_path=output_path,
-            danmaku_count=rendered.rendered_count,
-            metadata=metadata,
+    @staticmethod
+    def _episode_context(season, episode):
+        episode_title = episode.title or episode.long_title or str(episode.episode_id)
+        return TemplateContext(
+            season_title=season.title,
+            season_id=season.season_id,
+            episode_no=episode.display_number,
+            episode_id=episode.episode_id,
+            episode_title=episode_title,
+            long_title=episode.long_title,
+            bvid=episode.bvid,
+            cid=episode.cid,
+            source_type="ep",
         )
 
-    def _resolve_output_path(self, input_path, output_path):
-        if output_path is None:
-            return input_path.with_suffix(".ass")
-        return Path(output_path)
-
-    def _resolve_network_output_path(self, output_path, title):
-        if output_path is not None:
-            return Path(output_path)
-        return Path(safe_filename(title) + ".ass")
-
-    def _ensure_output_directory(self, output_path):
-        parent = output_path.parent
-        if not str(parent) or parent == Path("."):
-            return
-        try:
-            parent.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise OutputDirectoryError(
-                "output directory could not be created: {}".format(parent)
-            ) from exc
+    @staticmethod
+    def _episode_title(season, episode):
+        episode_title = episode.title or episode.long_title or str(episode.episode_id)
+        return "{} - {}".format(season.title, episode_title)
 
 
 def safe_filename(value):
-    value = str(value).strip()
-    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value)
-    value = re.sub(r"\s+", " ", value).strip(" .")
-    return value or "danmaku"
-
-
-_safe_filename = safe_filename
+    return _safe_filename(value)

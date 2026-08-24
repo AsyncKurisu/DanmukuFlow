@@ -8,6 +8,8 @@ from danmukuflow.models import (
     BatchExportRequest,
     ConflictPolicy,
     DEFAULT_CONCURRENCY,
+    OutputConfig,
+    OutputMode,
     RenderConfig,
 )
 from danmukuflow.services import (
@@ -18,7 +20,10 @@ from danmukuflow.services import (
     InvalidBilibiliIdentifierError,
     InputNotFoundError,
     InvalidXmlError,
+    InvalidOutputTemplateError,
+    OutputConflictError,
     OutputDirectoryError,
+    OutputPathEscapeError,
     OutputWriteError,
 )
 
@@ -52,6 +57,19 @@ def build_parser():
         help="output ASS file, defaults to a source-based filename",
     )
     convert.add_argument(
+        "--output-dir",
+        help="output directory for directory mode",
+    )
+    convert.add_argument(
+        "--template",
+        help="output naming template",
+    )
+    convert.add_argument(
+        "--conflict-policy",
+        choices=("overwrite", "skip", "error"),
+        help="output conflict policy",
+    )
+    convert.add_argument(
         "--page",
         type=int,
         help="BV video page to export (defaults to 1)",
@@ -68,7 +86,7 @@ def build_parser():
     )
     batch.add_argument(
         "--video-dir",
-        default=".",
+        default=None,
         help=(
             "directory containing local video files; defaults to the "
             "current command directory"
@@ -88,9 +106,27 @@ def build_parser():
         ),
     )
     batch.add_argument(
+        "--output-dir",
+        help="output directory for season batch exports",
+    )
+    batch.add_argument(
+        "--template",
+        help="output naming template",
+    )
+    batch.add_argument(
+        "--conflict-policy",
+        choices=("overwrite", "skip", "error"),
+        help="output conflict policy",
+    )
+    batch.add_argument(
         "--overwrite",
         action="store_true",
         help="overwrite existing ASS files instead of skipping them",
+    )
+    batch.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="skip existing ASS files instead of overwriting them",
     )
     batch.set_defaults(handler=_handle_batch)
 
@@ -104,9 +140,26 @@ def _handle_convert(args):
             raise InvalidBilibiliIdentifierError(
                 "--page is only valid for BV video input"
             )
+        output_path = Path(args.output) if args.output else None
+        if output_path is not None and args.output_dir:
+            raise InvalidOutputTemplateError(
+                "--output and --output-dir cannot be used together"
+            )
+        output_config = None
+        if args.output_dir or args.template or args.conflict_policy:
+            output_config = OutputConfig(
+                output_dir=Path(args.output_dir) if args.output_dir else None,
+                naming_template=args.template,
+                conflict_policy=_parse_conflict_policy(
+                    args.conflict_policy,
+                    default=ConflictPolicy.OVERWRITE,
+                ),
+                mode=OutputMode.DIRECTORY,
+            )
         request = ExportRequest(
             source=source,
-            output_path=Path(args.output) if args.output else None,
+            output_path=output_path,
+            output_config=output_config,
             render_config=RenderConfig(),
         )
         result = ExportService().export(request)
@@ -114,7 +167,9 @@ def _handle_convert(args):
         print(_format_error(exc), file=sys.stderr)
         return 1
 
-    if result.metadata.get("skipped_due_to_newer_output"):
+    if result.skipped:
+        print("Skipped: output already exists ({})".format(result.output_path))
+    elif result.metadata.get("skipped_due_to_newer_output"):
         print("Skipped: output is newer ({})".format(result.output_path))
     else:
         print(
@@ -129,16 +184,36 @@ def _handle_convert(args):
 def _handle_batch(args):
     try:
         source = source_from_input(args.input)
-        request = BatchExportRequest(
-            source=source,
-            video_dir=Path(args.video_dir),
-            episodes=args.episodes,
-            concurrency=args.concurrency,
-            conflict_policy=(
+        conflict_policy = _parse_conflict_policy(
+            args.conflict_policy,
+            default=(
                 ConflictPolicy.OVERWRITE
                 if args.overwrite
-                else ConflictPolicy.SKIP
+                else (
+                    ConflictPolicy.SKIP
+                    if not args.skip_existing
+                    else ConflictPolicy.SKIP
+                )
             ),
+        )
+        video_dir = Path(args.video_dir) if args.video_dir is not None else None
+        if args.output_dir is None and video_dir is None:
+            video_dir = Path(".")
+        output_config = None
+        if args.output_dir or args.template or args.conflict_policy:
+            output_config = OutputConfig(
+                output_dir=Path(args.output_dir) if args.output_dir else None,
+                naming_template=args.template,
+                conflict_policy=conflict_policy,
+                mode=OutputMode.DIRECTORY,
+        )
+        request = BatchExportRequest(
+            source=source,
+            video_dir=video_dir,
+            episodes=args.episodes,
+            concurrency=args.concurrency,
+            conflict_policy=conflict_policy,
+            output_config=output_config,
             render_config=RenderConfig(),
         )
         result = BatchExportService().export(request)
@@ -183,11 +258,23 @@ def _format_error(error):
         return "error: invalid XML: {}".format(error)
     if isinstance(error, OutputDirectoryError):
         return "error: output directory error: {}".format(error)
+    if isinstance(error, OutputPathEscapeError):
+        return "error: output path is outside allowed roots: {}".format(error)
+    if isinstance(error, OutputConflictError):
+        return "error: output conflict: {}".format(error)
     if isinstance(error, OutputWriteError):
         return "error: output write error: {}".format(error)
     if isinstance(error, InvalidBilibiliIdentifierError):
         return "error: invalid Bilibili input: {}".format(error)
+    if isinstance(error, InvalidOutputTemplateError):
+        return "error: invalid output template: {}".format(error)
     return "error: {}".format(error)
+
+
+def _parse_conflict_policy(value, default):
+    if value:
+        return ConflictPolicy(value)
+    return default
 
 
 if __name__ == "__main__":

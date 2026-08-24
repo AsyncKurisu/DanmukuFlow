@@ -194,6 +194,45 @@ def test_cli_batch_builds_request_and_reports_summary(
     assert "skipped=1" in captured_output.out
 
 
+def test_cli_batch_with_output_dir_uses_directory_mode(monkeypatch, tmp_path, capsys):
+    captured = {}
+
+    class FakeBatchExportService:
+        def export(self, request):
+            captured["request"] = request
+            return BatchExportResult(
+                total=1,
+                matched=1,
+                selected=1,
+                succeeded=1,
+                failed=0,
+                skipped=0,
+                unmatched_local=0,
+                unmatched_episode=0,
+                ambiguous=0,
+            )
+
+    monkeypatch.setattr(cli, "BatchExportService", FakeBatchExportService)
+
+    exit_code = cli.main(
+        [
+            "batch",
+            "ss123",
+            "--output-dir",
+            str(tmp_path),
+            "--episodes",
+            "1",
+        ]
+    )
+
+    capsys.readouterr()
+    request = captured["request"]
+    assert exit_code == 0
+    assert request.video_dir is None
+    assert request.output_config is not None
+    assert request.output_config.output_dir == tmp_path
+
+
 def test_cli_batch_returns_nonzero_for_episode_failure(
     monkeypatch, tmp_path, capsys
 ):

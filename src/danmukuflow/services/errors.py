@@ -22,6 +22,18 @@ class OutputWriteError(ExportError):
     pass
 
 
+class InvalidOutputTemplateError(ExportError):
+    pass
+
+
+class OutputConflictError(ExportError):
+    pass
+
+
+class OutputPathEscapeError(ExportError):
+    pass
+
+
 class RenderError(ExportError):
     pass
 
