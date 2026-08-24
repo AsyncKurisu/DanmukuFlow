@@ -2,18 +2,22 @@ import asyncio
 import io
 import json
 import tempfile
+import threading
 import zipfile
 from functools import partial
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from danmukuflow.bilibili.service import BilibiliService
 from danmukuflow.models import (
     BVSource,
     BatchExportRequest,
+    DEFAULT_BATCH_NAMING_TEMPLATE,
     EpisodeSource,
     OutputConfig,
     OutputMode,
@@ -32,22 +36,31 @@ from danmukuflow.services import (
     OutputRegistry,
     OutputService,
     InputNotFoundError,
+    InvalidEpisodeSelectionError,
     PageNotFoundError,
     SeasonNotFoundError,
     EpisodeNotFoundError,
     VideoNotFoundError,
+    VideoDirectoryAccessError,
     VideoDirectoryNotFoundError,
     VideoDirectoryNotDirectoryError,
     NoVideoFilesError,
 )
 from danmukuflow.web.schemas import (
     BatchExportRequestSchema,
+    DirectorySelectRequestSchema,
     ResolveRequestSchema,
     SingleExportRequestSchema,
     episode_to_dict,
     season_to_dict,
     video_to_dict,
 )
+
+_directory_picker_lock = threading.Lock()
+
+
+class DirectoryPickerUnavailableError(RuntimeError):
+    """Raised when the host cannot open a native directory picker."""
 
 
 async def _run_in_threadpool(func, *args, **kwargs):
@@ -62,9 +75,10 @@ def create_app(
     export_service=None,
     batch_export_service=None,
     allowed_output_roots=None,
+    frontend_dist_dir=None,
 ):
     if allowed_output_roots is None:
-        allowed_output_roots = (Path.cwd(),)
+        allowed_output_roots = ()
     allowed_output_roots = tuple(Path(item) for item in allowed_output_roots)
 
     registry = OutputRegistry()
@@ -89,10 +103,24 @@ def create_app(
     app.state.batch_export_service = batch_export_service
     app.state.bilibili_service = bilibili_service
 
+    @app.post("/api/directories/select")
+    async def select_directory(request: DirectorySelectRequestSchema):
+        try:
+            selected_path = await _run_in_threadpool(
+                _pick_directory,
+                request.kind,
+            )
+        except DirectoryPickerUnavailableError as exc:
+            return _error_response(503, str(exc))
+        if selected_path is None:
+            return Response(status_code=204)
+        return {"path": str(selected_path)}
+
     @app.post("/api/resolve")
     @app.post("/api/seasons/resolve")
     async def resolve(request: ResolveRequestSchema):
         try:
+            request = _coerce_schema(request, ResolveRequestSchema)
             source = source_from_input(request.input, page=request.page)
             if isinstance(source, BVSource):
                 video = await _run_in_threadpool(
@@ -120,9 +148,9 @@ def create_app(
                     "season": season_to_dict(season),
                     "episodes": [episode_to_dict(item) for item in season.episodes],
                 }
-            raise HTTPException(status_code=400, detail="unsupported input")
+            return _error_response(400, "unsupported input")
         except (ExportError, BatchExportError) as exc:
-            raise HTTPException(status_code=_service_status(exc), detail=str(exc))
+            return _error_response(_service_status(exc), str(exc))
 
     @app.post("/api/exports")
     async def export(request: Request):
@@ -147,9 +175,11 @@ def create_app(
                 return _download_response(result.artifact)
             return _json_response(_export_result_payload(result))
         except ValidationError as exc:
-            raise HTTPException(status_code=422, detail=exc.errors())
+            return _error_response(422, exc.errors())
         except (ExportError, BatchExportError) as exc:
-            raise HTTPException(status_code=_service_status(exc), detail=str(exc))
+            return _error_response(_service_status(exc), str(exc))
+        except HTTPException as exc:
+            return _error_response(exc.status_code, exc.detail)
         finally:
             if temp_path is not None:
                 try:
@@ -160,40 +190,87 @@ def create_app(
     @app.post("/api/batch-exports")
     async def batch_export(request: BatchExportRequestSchema):
         try:
-            output_config = _build_batch_output_config(request, app.state.output_service)
+            request = _coerce_schema(request, BatchExportRequestSchema)
+            if request.video_dir and request.output_dir:
+                return _error_response(
+                    422,
+                    "video_dir and output_dir cannot be used together",
+                )
+            video_dir = None
+            if request.video_dir:
+                try:
+                    video_dir = app.state.output_service.validate_path(
+                        Path(request.video_dir),
+                        output_config=OutputConfig(
+                            allowed_output_roots=(
+                                app.state.output_service.allowed_output_roots
+                            ),
+                        ),
+                    )
+                except OutputPathEscapeError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+            output_dir = None
+            if request.output_dir:
+                try:
+                    output_dir = app.state.output_service.validate_path(
+                        Path(request.output_dir),
+                        output_config=OutputConfig(
+                            allowed_output_roots=(
+                                app.state.output_service.allowed_output_roots
+                            ),
+                        ),
+                    )
+                except OutputPathEscapeError as exc:
+                    return _error_response(400, str(exc))
+
+            output_config = _build_batch_output_config(
+                request,
+                app.state.output_service,
+                video_dir=video_dir,
+                output_dir=output_dir,
+            )
             batch_request = BatchExportRequest(
                 source=SeasonSource(request.season_id),
+                video_dir=video_dir,
                 selected_episode_ids=tuple(request.selected_episode_ids),
                 output_config=output_config,
                 concurrency=request.concurrency,
+                conflict_policy=request.conflict_policy,
                 render_config=request.render_config.to_model(),
             )
             result = await _run_in_threadpool(
                 app.state.batch_export_service.export,
                 batch_request,
             )
-            if output_config.is_download and result.failed == 0:
+            if output_config.is_download and video_dir is None:
                 artifacts = [
                     item.artifact or (item.result.artifact if item.result else None)
                     for item in result.items
                     if item.status.value in ("succeeded", "fallback")
                 ]
                 artifacts = [item for item in artifacts if item is not None]
-                if len(artifacts) == 1:
+                if len(artifacts) == 1 and not _batch_result_is_partial(result):
                     return _download_response(artifacts[0])
-                if len(artifacts) > 1:
-                    return _download_zip_response(artifacts, request.season_id)
+                if artifacts:
+                    return _download_zip_response(
+                        artifacts,
+                        request.season_id,
+                        result=result,
+                    )
             return _json_response(_batch_result_payload(result))
         except ValidationError as exc:
-            raise HTTPException(status_code=422, detail=exc.errors())
+            return _error_response(422, exc.errors())
         except (ExportError, BatchExportError) as exc:
-            raise HTTPException(status_code=_service_status(exc), detail=str(exc))
+            return _error_response(_service_status(exc), str(exc))
+        except HTTPException as exc:
+            return _error_response(exc.status_code, exc.detail)
 
     @app.get("/api/files/{artifact_id}")
     async def file(artifact_id: str):
         artifact = app.state.output_service.registry.get(artifact_id)
         if artifact is None:
-            raise HTTPException(status_code=404, detail="file not found")
+            return _error_response(404, "file not found")
         if artifact.path is not None:
             try:
                 path = app.state.output_service.resolve_existing_path(
@@ -203,31 +280,67 @@ def create_app(
                     ),
                 )
             except OutputPathEscapeError:
-                raise HTTPException(status_code=404, detail="file not found")
+                return _error_response(404, "file not found")
             if not path.exists():
-                raise HTTPException(status_code=404, detail="file not found")
+                return _error_response(404, "file not found")
             return FileResponse(
                 path,
                 filename=artifact.filename,
                 media_type=artifact.media_type,
             )
         if artifact.content is None:
-            raise HTTPException(status_code=404, detail="file not available")
+            return _error_response(404, "file not available")
         return Response(
             content=artifact.content,
             media_type=artifact.media_type,
             headers={
-                "Content-Disposition": 'attachment; filename="{}"'.format(
-                    artifact.filename
-                )
+                "Content-Disposition": _content_disposition(artifact.filename),
             },
         )
+
+    if frontend_dist_dir is None:
+        frontend_dist_dir = (
+            Path(__file__).resolve().parents[3] / "web" / "dist"
+        )
+    frontend_dist_dir = Path(frontend_dist_dir)
+    if frontend_dist_dir.is_dir() and hasattr(app, "mount"):
+        app.mount(
+            "/",
+            StaticFiles(directory=str(frontend_dist_dir), html=True),
+            name="frontend",
+        )
+    elif frontend_dist_dir.is_dir():
+        index_path = frontend_dist_dir / "index.html"
+
+        @app.get("/")
+        async def frontend_index(request: Request = None):
+            return FileResponse(index_path, media_type="text/html")
 
     return app
 
 
 async def _read_payload(request):
     content_type = request.headers.get("content-type", "")
+    if content_type.startswith("multipart/form-data") or not content_type:
+        try:
+            form = await request.form()
+            form_items = list(form.multi_items())
+        except Exception:
+            form_items = []
+        if form_items:
+            payload = {
+                key: value for key, value in form_items if key != "xml_file"
+            }
+            xml_file = form.get("xml_file")
+            if xml_file is not None:
+                payload["_xml_upload"] = xml_file
+            if "render_config" in payload and isinstance(
+                payload["render_config"],
+                str,
+            ):
+                payload["render_config"] = _maybe_json(payload["render_config"])
+            return payload
+
     if content_type.startswith("multipart/form-data"):
         form = await request.form()
         payload = {key: value for key, value in form.multi_items() if key != "xml_file"}
@@ -288,18 +401,39 @@ def _build_single_output_config(schema, output_service):
     )
 
 
-def _build_batch_output_config(schema, output_service):
-    if schema.output_dir:
+def _build_batch_output_config(
+    schema,
+    output_service,
+    *,
+    video_dir=None,
+    output_dir=None,
+):
+    if video_dir is not None:
         return OutputConfig(
-            output_dir=Path(schema.output_dir),
+            output_dir=video_dir,
             naming_template=schema.naming_template,
             organization_mode=schema.organization_mode,
             conflict_policy=schema.conflict_policy,
             mode=OutputMode.DIRECTORY,
             allowed_output_roots=output_service.allowed_output_roots,
         )
+    if schema.output_dir:
+        return OutputConfig(
+            output_dir=output_dir or Path(schema.output_dir),
+            naming_template=(
+                schema.naming_template
+                or DEFAULT_BATCH_NAMING_TEMPLATE
+            ),
+            organization_mode=schema.organization_mode,
+            conflict_policy=schema.conflict_policy,
+            mode=OutputMode.DIRECTORY,
+            allowed_output_roots=output_service.allowed_output_roots,
+        )
     return OutputConfig(
-        naming_template=schema.naming_template,
+        naming_template=(
+            schema.naming_template
+            or DEFAULT_BATCH_NAMING_TEMPLATE
+        ),
         organization_mode=schema.organization_mode,
         conflict_policy=schema.conflict_policy,
         mode=OutputMode.DOWNLOAD,
@@ -311,19 +445,30 @@ def _should_download(schema, result):
     return schema.output_path is None and schema.output_dir is None and result.skipped is False
 
 
+def _content_disposition(filename):
+    filename = str(filename or "download.ass")
+    fallback = filename if filename.isascii() else "download"
+    if not fallback.lower().endswith((".ass", ".zip")):
+        suffix = Path(filename).suffix
+        fallback = "download{}".format(suffix if suffix.isascii() else "")
+    encoded = quote(filename, safe="")
+    return 'attachment; filename="{}"; filename*=UTF-8\'\'{}'.format(
+        fallback,
+        encoded,
+    )
+
+
 def _download_response(artifact):
     return Response(
         content=artifact.content or b"",
         media_type=artifact.media_type,
         headers={
-            "Content-Disposition": 'attachment; filename="{}"'.format(
-                artifact.filename
-            )
+            "Content-Disposition": _content_disposition(artifact.filename),
         },
     )
 
 
-def _download_zip_response(artifacts, season_id):
+def _download_zip_response(artifacts, season_id, result=None):
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
         for artifact in artifacts:
@@ -333,16 +478,65 @@ def _download_zip_response(artifacts, season_id):
                 name,
                 artifact.content or b"",
             )
+        if result is not None and _batch_result_is_partial(result):
+            archive.writestr(
+                "batch-result.json",
+                json.dumps(
+                    _batch_download_manifest(result),
+                    ensure_ascii=False,
+                    indent=2,
+                ).encode("utf-8"),
+            )
     buffer.seek(0)
+    partial = result is not None and _batch_result_is_partial(result)
     return Response(
         content=buffer.read(),
         media_type="application/zip",
         headers={
-            "Content-Disposition": 'attachment; filename="season-{}.zip"'.format(
-                season_id
-            )
+            "Content-Disposition": _content_disposition(
+                "season-{}.zip".format(season_id)
+            ),
+            "X-DanmukuFlow-Partial": "true" if partial else "false",
+            "X-DanmukuFlow-Failed-Count": str(result.failed if result else 0),
         },
     )
+
+
+def _batch_result_is_partial(result):
+    return any(
+        (
+            result.failed,
+            result.skipped,
+            result.unmatched_local,
+            result.unmatched_episode,
+            result.ambiguous,
+        )
+    )
+
+
+def _batch_download_manifest(result):
+    return {
+        "total": result.total,
+        "matched": result.matched,
+        "selected": result.selected,
+        "succeeded": result.succeeded,
+        "failed": result.failed,
+        "skipped": result.skipped,
+        "unmatched_local": result.unmatched_local,
+        "unmatched_episode": result.unmatched_episode,
+        "ambiguous": result.ambiguous,
+        "pending": result.pending,
+        "running": result.running,
+        "fallback": result.fallback,
+        "items": [
+            _batch_item_payload(item)
+            for item in result.items
+            if (
+                (item.status.value if hasattr(item.status, "value") else str(item.status))
+                not in ("succeeded", "fallback")
+            )
+        ],
+    }
 
 
 def _export_result_payload(result):
@@ -375,14 +569,22 @@ def _batch_result_payload(result):
 
 
 def _batch_item_payload(item):
+    status = item.status.value if hasattr(item.status, "value") else str(item.status)
+    if status == "unmatched":
+        status = (
+            "unmatched_local"
+            if item.local_video_path is not None
+            else "unmatched_episode"
+        )
     return {
         "episode_id": item.episode_id,
         "display_number": item.display_number,
         "episode_title": item.episode_title,
         "local_video_path": str(item.local_video_path) if item.local_video_path else None,
         "output_path": str(item.output_path) if item.output_path else None,
-        "status": item.status.value if hasattr(item.status, "value") else str(item.status),
+        "status": status,
         "reason": item.reason,
+        "error": str(item.error) if item.error else None,
         "fallback": item.fallback,
         "artifact": _artifact_payload(item.artifact),
     }
@@ -425,6 +627,66 @@ def _json_response(payload, status_code=200):
     return JSONResponse(content=payload, status_code=status_code)
 
 
+def _error_response(status_code, detail):
+    return _json_response({"detail": detail}, status_code=status_code)
+
+
+def _pick_directory(kind):
+    if not _directory_picker_lock.acquire(blocking=False):
+        raise DirectoryPickerUnavailableError(
+            "directory picker is already open"
+        )
+
+    root = None
+    try:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+        except Exception as exc:
+            raise DirectoryPickerUnavailableError(
+                "native directory picker is unavailable"
+            ) from exc
+
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            root.update()
+            title = (
+                "选择普通输出目录"
+                if kind == "output"
+                else "选择本地视频目录"
+            )
+            selected = filedialog.askdirectory(
+                parent=root,
+                title=title,
+                mustexist=False,
+            )
+        except Exception as exc:
+            raise DirectoryPickerUnavailableError(
+                "native directory picker is unavailable"
+            ) from exc
+
+        if not selected:
+            return None
+        return Path(selected).expanduser().resolve()
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+        _directory_picker_lock.release()
+
+
+def _coerce_schema(value, schema_type):
+    if isinstance(value, schema_type):
+        return value
+    if isinstance(value, dict):
+        return schema_type(**value)
+    return value
+
+
 def _service_status(error):
     if isinstance(
         error,
@@ -444,9 +706,11 @@ def _service_status(error):
             VideoDirectoryNotFoundError,
             VideoDirectoryNotDirectoryError,
             NoVideoFilesError,
+            VideoDirectoryAccessError,
+            InvalidEpisodeSelectionError,
         ),
     ):
-        return 404
+        return 400
     return 400
 
 

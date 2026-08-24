@@ -19,6 +19,8 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+node_modules/
+*.tsbuildinfo
 downloads/
 eggs/
 .eggs/

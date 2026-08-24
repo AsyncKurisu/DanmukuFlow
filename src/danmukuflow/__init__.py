@@ -76,6 +76,7 @@ from danmukuflow.services import (
     OutputService,
     convert_xml_to_ass,
 )
+from danmukuflow.bilibili.credentials import BilibiliCredentials
 
 __all__ = [
     "BVSource",
@@ -87,6 +88,7 @@ __all__ = [
     "BatchItemStatus",
     "BilibiliIdentifier",
     "BilibiliApiError",
+    "BilibiliCredentials",
     "BilibiliDataError",
     "BilibiliDecodeError",
     "BilibiliHttpError",

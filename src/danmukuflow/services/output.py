@@ -221,6 +221,10 @@ class OutputService:
         )
 
     def resolve_existing_path(self, path, *, output_config=None):
+        return self.validate_path(path, output_config=output_config)
+
+    def validate_path(self, path, *, output_config=None):
+        """Resolve a server path after checking the configured root boundary."""
         output_config = output_config or OutputConfig()
         path = Path(path)
         self._ensure_allowed(path, output_config)

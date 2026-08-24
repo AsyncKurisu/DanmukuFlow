@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -76,6 +76,10 @@ class ResolveRequestSchema(BaseModel):
     page: Optional[int] = None
 
 
+class DirectorySelectRequestSchema(BaseModel):
+    kind: Literal["output", "video"]
+
+
 class SingleExportRequestSchema(BaseModel):
     input: Optional[str] = None
     page: Optional[int] = None
@@ -92,11 +96,12 @@ class SingleExportRequestSchema(BaseModel):
 class BatchExportRequestSchema(BaseModel):
     season_id: int
     selected_episode_ids: List[int] = Field(default_factory=list)
+    video_dir: Optional[str] = None
     output_dir: Optional[str] = None
     naming_template: Optional[str] = None
     organization_mode: OutputOrganizationMode = OutputOrganizationMode.SEASON
     conflict_policy: str = "overwrite"
-    concurrency: int = 3
+    concurrency: int = 1
     render_config: RenderConfigSchema = Field(default_factory=RenderConfigSchema)
 
 

@@ -16,6 +16,8 @@ from danmukuflow.models import (
     RenderConfig,
     Season,
     SeasonSource,
+    OutputConfig,
+    OutputMode,
 )
 from danmukuflow.parsers.local_episode import parse_local_episode_key
 from danmukuflow.services import (
@@ -292,6 +294,28 @@ def test_batch_export_writes_ass_beside_matching_video(tmp_path):
         assert ass_path.exists()
         assert ass_path.parent == video_path.parent
         assert ass_path.stem == video_path.stem
+
+
+def test_batch_export_default_output_template_is_flat_without_episode_id(tmp_path):
+    fake = FakeBatchBilibiliService([make_episode(1), make_episode(2)])
+    result = BatchExportService(bilibili_service=fake).export(
+        BatchExportRequest(
+            source=SeasonSource(123),
+            selected_episode_ids=(107, 207),
+            output_config=OutputConfig(
+                output_dir=tmp_path,
+                mode=OutputMode.DIRECTORY,
+                conflict_policy=ConflictPolicy.OVERWRITE,
+            ),
+            concurrency=1,
+            render_config=RenderConfig(),
+        )
+    )
+
+    assert result.succeeded == 2
+    assert (tmp_path / "Demo Season-1.ass").exists()
+    assert (tmp_path / "Demo Season-2.ass").exists()
+    assert not (tmp_path / "Demo Season").exists()
 
 
 def test_batch_export_skips_existing_ass_without_fetching_episode(tmp_path):
