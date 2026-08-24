@@ -1,7 +1,9 @@
 import io
+import importlib
 import zipfile
 from types import SimpleNamespace
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
 
@@ -19,6 +21,7 @@ from danmukuflow.models import (
 )
 from danmukuflow.services import OutputPathEscapeError, OutputService
 from danmukuflow.web import create_app
+from danmukuflow.web.app import DirectoryPickerUnavailableError
 
 
 class FakeBilibiliService:
@@ -81,6 +84,13 @@ class FakeBilibiliService:
             segment_count=1,
             skipped_count=0,
         )
+
+
+class PartiallyFailingBilibiliService(FakeBilibiliService):
+    def fetch_danmaku_with_stats(self, cid, duration_s):
+        if cid == 202:
+            raise RuntimeError("episode 2 failed")
+        return super().fetch_danmaku_with_stats(cid, duration_s)
 
 
 def test_output_service_renders_safe_nested_paths(tmp_path):
@@ -196,6 +206,77 @@ def test_web_resolve_and_export_and_batch_download(tmp_path):
     assert len(batch_payload["items"]) == 2
 
 
+def test_web_directory_picker_returns_selected_path(tmp_path, monkeypatch):
+    web_app = importlib.import_module("danmukuflow.web.app")
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    monkeypatch.setattr(web_app, "_pick_directory", lambda kind: selected)
+
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/directories/select",
+        json={"kind": "output"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"path": str(selected.resolve())}
+
+
+def test_web_directory_picker_cancel_keeps_request_empty(monkeypatch):
+    web_app = importlib.import_module("danmukuflow.web.app")
+    monkeypatch.setattr(web_app, "_pick_directory", lambda kind: None)
+
+    response = TestClient(create_app()).post(
+        "/api/directories/select",
+        json={"kind": "video"},
+    )
+
+    assert response.status_code == 204
+    assert response.content == b""
+
+
+def test_web_directory_picker_unavailable_returns_service_error(monkeypatch):
+    web_app = importlib.import_module("danmukuflow.web.app")
+
+    def unavailable(kind):
+        raise DirectoryPickerUnavailableError("native directory picker is unavailable")
+
+    monkeypatch.setattr(web_app, "_pick_directory", unavailable)
+
+    response = TestClient(create_app()).post(
+        "/api/directories/select",
+        json={"kind": "output"},
+    )
+
+    assert response.status_code == 503
+    assert "native directory picker" in response.json()["detail"]
+
+
+def test_web_default_allows_output_directory_outside_project_root(tmp_path):
+    output_dir = tmp_path / "test_ss"
+    app = create_app(bilibili_service=FakeBilibiliService())
+
+    response = TestClient(app).post(
+        "/api/batch-exports",
+        json={
+            "season_id": 1,
+            "selected_episode_ids": [11],
+            "output_dir": str(output_dir),
+            "conflict_policy": "overwrite",
+            "render_config": {},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["succeeded"] == 1
+    output_path = Path(payload["items"][0]["output_path"])
+    assert output_path == output_dir / "Demo Season-1.ass"
+    assert output_path.exists()
+    assert not (output_dir / "Demo Season").exists()
+
+
 def test_web_download_responses_use_attachments(tmp_path):
     app = create_app(
         bilibili_service=FakeBilibiliService(),
@@ -213,6 +294,8 @@ def test_web_download_responses_use_attachments(tmp_path):
     )
     assert single.status_code == 200
     assert single.headers["Content-Disposition"].startswith("attachment;")
+    assert "filename*=UTF-8''" in single.headers["Content-Disposition"]
+    assert "filename*=UTF-8''Demo%20Video-1.ass" in single.headers["Content-Disposition"]
 
     batch = client.post(
         "/api/batch-exports",
@@ -224,12 +307,112 @@ def test_web_download_responses_use_attachments(tmp_path):
     )
     assert batch.status_code == 200
     assert batch.headers["Content-Disposition"].startswith("attachment;")
+    assert "filename*=UTF-8''season-1.zip" in batch.headers["Content-Disposition"]
     assert batch.headers["content-type"] == "application/zip"
     with zipfile.ZipFile(io.BytesIO(batch.content)) as archive:
         assert archive.namelist() == [
-            "Demo Season/1_Episode 1_11.ass",
-            "Demo Season/2_Episode 2_22.ass",
+            "Demo Season-1.ass",
+            "Demo Season-2.ass",
         ]
+
+
+def test_web_single_page_bv_download_omits_page_suffix(tmp_path):
+    bilibili_service = FakeBilibiliService()
+    bilibili_service.video.pages = [
+        SimpleNamespace(page=1, part="P1", cid=101, duration_s=1.0),
+    ]
+    app = create_app(
+        bilibili_service=bilibili_service,
+        allowed_output_roots=(tmp_path,),
+    )
+
+    response = TestClient(app).post(
+        "/api/exports",
+        json={
+            "input": "BV1",
+            "page": 1,
+            "render_config": {},
+        },
+    )
+
+    assert response.status_code == 200
+    assert "filename*=UTF-8''Demo%20Video.ass" in response.headers["Content-Disposition"]
+
+
+def test_web_partial_batch_download_contains_successes_and_manifest(tmp_path):
+    app = create_app(
+        bilibili_service=PartiallyFailingBilibiliService(),
+        allowed_output_roots=(tmp_path,),
+    )
+    response = TestClient(app).post(
+        "/api/batch-exports",
+        json={
+            "season_id": 1,
+            "selected_episode_ids": [11, 22],
+            "render_config": {},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert response.headers["x-danmukuflow-partial"] == "true"
+    assert response.headers["x-danmukuflow-failed-count"] == "1"
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.namelist() == ["Demo Season-1.ass", "batch-result.json"]
+        manifest = __import__("json").loads(
+            archive.read("batch-result.json").decode("utf-8")
+        )
+    assert manifest["succeeded"] == 1
+    assert manifest["failed"] == 1
+    assert manifest["items"][0]["reason"] == "episode 2 failed"
+
+
+def test_web_custom_batch_template_keeps_episode_id_and_subdirectories(tmp_path):
+    app = create_app(
+        bilibili_service=FakeBilibiliService(),
+        allowed_output_roots=(tmp_path,),
+    )
+    response = TestClient(app).post(
+        "/api/batch-exports",
+        json={
+            "season_id": 1,
+            "selected_episode_ids": [11],
+            "output_dir": str(tmp_path),
+            "naming_template": "{season_title}/{episode_no}_{episode_id}.ass",
+            "render_config": {},
+        },
+    )
+
+    assert response.status_code == 200
+    assert Path(response.json()["items"][0]["output_path"]) == (
+        tmp_path / "Demo Season" / "1_11.ass"
+    )
+
+
+def test_web_download_supports_unicode_filenames(tmp_path):
+    bilibili_service = FakeBilibiliService()
+    bilibili_service.video.title = "中文视频"
+    app = create_app(
+        bilibili_service=bilibili_service,
+        allowed_output_roots=(tmp_path,),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/exports",
+        json={
+            "input": "BV1",
+            "page": 1,
+            "naming_template": "{video_title}.ass",
+            "render_config": {},
+        },
+    )
+
+    assert response.status_code == 200
+    disposition = response.headers["Content-Disposition"]
+    assert 'filename="download.ass"' in disposition
+    encoded = disposition.split("filename*=UTF-8''", 1)[1]
+    assert unquote(encoded) == "中文视频.ass"
 
 
 def test_web_file_access_uses_registry(tmp_path):
@@ -257,6 +440,28 @@ def test_web_file_access_uses_registry(tmp_path):
     assert response.headers["Content-Disposition"].startswith("attachment;")
 
 
+def test_web_file_access_supports_unicode_memory_artifacts(tmp_path):
+    app = create_app(
+        bilibili_service=FakeBilibiliService(),
+        allowed_output_roots=(tmp_path,),
+    )
+    client = TestClient(app)
+    artifact = OutputArtifact(
+        artifact_id="unicode",
+        filename="中文.ass",
+        content=b"[Script Info]\n",
+    )
+    app.state.output_service.registry.register(artifact)
+
+    response = client.get("/api/files/unicode")
+
+    assert response.status_code == 200
+    disposition = response.headers["Content-Disposition"]
+    assert 'filename="download.ass"' in disposition
+    encoded = disposition.split("filename*=UTF-8''", 1)[1]
+    assert unquote(encoded) == "中文.ass"
+
+
 def test_web_file_access_rejects_paths_outside_allowed_roots(tmp_path):
     app = create_app(
         bilibili_service=FakeBilibiliService(),
@@ -273,3 +478,147 @@ def test_web_file_access_rejects_paths_outside_allowed_roots(tmp_path):
 
     response = client.get("/api/files/outside")
     assert response.status_code == 404
+
+
+def test_web_xml_upload_returns_ass_attachment(tmp_path):
+    app = create_app(
+        bilibili_service=FakeBilibiliService(),
+        allowed_output_roots=(tmp_path,),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/exports",
+        files={
+            "xml_file": (
+                "uploaded.xml",
+                b'<i><d p="0,1,25,16711680">uploaded</d></i>',
+                "application/xml",
+            )
+        },
+        data={"render_config": "{}"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.headers["Content-Disposition"].startswith("attachment;")
+    assert b"uploaded" in response.content
+
+
+def test_web_batch_video_dir_uses_local_video_output_and_real_episode_ids(
+    tmp_path,
+):
+    (tmp_path / "[Show] [01].mkv").write_text("", encoding="utf-8")
+    (tmp_path / "[Show] [09].mkv").write_text("", encoding="utf-8")
+    app = create_app(
+        bilibili_service=FakeBilibiliService(),
+        allowed_output_roots=(tmp_path,),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/batch-exports",
+        json={
+            "season_id": 1,
+            "selected_episode_ids": [11, 22],
+            "video_dir": str(tmp_path),
+            "conflict_policy": "overwrite",
+            "concurrency": 1,
+            "render_config": {},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["succeeded"] == 1
+    assert payload["unmatched_local"] == 1
+    assert payload["unmatched_episode"] == 1
+    statuses = {item["status"] for item in payload["items"]}
+    assert "succeeded" in statuses
+    assert "unmatched_local" in statuses
+    assert "unmatched_episode" in statuses
+    assert (tmp_path / "[Show] [01].ass").exists()
+    assert not (tmp_path / "[Show] [09].ass").exists()
+
+
+def test_web_batch_rejects_video_and_output_dirs_together(tmp_path):
+    app = create_app(
+        bilibili_service=FakeBilibiliService(),
+        allowed_output_roots=(tmp_path,),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/batch-exports",
+        json={
+            "season_id": 1,
+            "selected_episode_ids": [11],
+            "video_dir": str(tmp_path),
+            "output_dir": str(tmp_path / "out"),
+            "render_config": {},
+        },
+    )
+
+    assert response.status_code == 422
+    assert "cannot be used together" in response.json()["detail"]
+
+
+def test_web_batch_rejects_episode_not_in_season(tmp_path):
+    app = create_app(
+        bilibili_service=FakeBilibiliService(),
+        allowed_output_roots=(tmp_path,),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/batch-exports",
+        json={
+            "season_id": 1,
+            "selected_episode_ids": [999],
+            "render_config": {},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "do not belong to this season" in response.json()["detail"]
+
+
+def test_web_batch_rejects_output_outside_allowed_roots(tmp_path):
+    app = create_app(
+        bilibili_service=FakeBilibiliService(),
+        allowed_output_roots=(tmp_path,),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/batch-exports",
+        json={
+            "season_id": 1,
+            "selected_episode_ids": [11],
+            "output_dir": str(tmp_path.parent / "outside"),
+            "render_config": {},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "allowed output roots" in response.json()["detail"]
+
+
+def test_web_static_frontend_can_be_served(tmp_path):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text(
+        "<html><body>DanmukuFlow</body></html>",
+        encoding="utf-8",
+    )
+    app = create_app(
+        bilibili_service=FakeBilibiliService(),
+        allowed_output_roots=(tmp_path,),
+        frontend_dist_dir=dist,
+    )
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "DanmukuFlow" in response.text

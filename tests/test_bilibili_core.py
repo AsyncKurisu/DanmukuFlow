@@ -4,12 +4,15 @@ import httpx
 import pytest
 
 from danmukuflow.bilibili.client import BilibiliClient, HttpResponse
+from danmukuflow.bilibili.credentials import BilibiliCredentials
 from danmukuflow.bilibili.service import BilibiliService
 from danmukuflow.models import (
     BVSource,
     DanmakuType,
     Episode,
     EpisodeSource,
+    OutputConfig,
+    OutputMode,
     Season,
     SeasonSource,
     Video,
@@ -335,6 +338,92 @@ def test_bilibili_client_accepts_httpx_mock_transport():
     assert calls[0].url.params["cid"] == "101"
 
 
+def test_bilibili_client_adds_credentials_and_browser_headers():
+    transport = FakeTransport([HttpResponse(status_code=200, content=b"ok")])
+    client = BilibiliClient(
+        transport=transport,
+        credentials=BilibiliCredentials(sessdata="session", bili_jct="csrf"),
+        request_interval=0,
+        max_attempts=1,
+    )
+
+    client.get("https://example.test")
+
+    assert transport.calls[0]["headers"]["Cookie"] == (
+        "SESSDATA=session; bili_jct=csrf"
+    )
+    assert transport.calls[0]["headers"]["Referer"] == "https://www.bilibili.com/"
+    assert transport.calls[0]["headers"]["Origin"] == "https://www.bilibili.com"
+
+
+def test_bilibili_client_retries_352_with_backoff_then_succeeds():
+    transport = FakeTransport(
+        [
+            json_response({"code": -352, "message": "risk control"}),
+            json_response({"code": -352, "message": "risk control"}),
+            HttpResponse(status_code=200, content=b"ok"),
+        ]
+    )
+    delays = []
+    client = BilibiliClient(
+        transport=transport,
+        max_attempts=3,
+        request_interval=0,
+        sleeper=delays.append,
+    )
+
+    response = client.get("https://example.test")
+
+    assert response.content == b"ok"
+    assert len(transport.calls) == 3
+    assert delays == [2.0, 5.0]
+
+
+def test_bilibili_client_rate_limits_requests():
+    transport = FakeTransport(
+        [
+            HttpResponse(status_code=200, content=b"first"),
+            HttpResponse(status_code=200, content=b"second"),
+        ]
+    )
+    delays = []
+    client = BilibiliClient(
+        transport=transport,
+        max_attempts=1,
+        request_interval=1.0,
+        sleeper=delays.append,
+    )
+
+    client.get("https://example.test")
+    client.get("https://example.test")
+
+    assert len(delays) == 1
+    assert 0.9 <= delays[0] <= 1.0
+
+
+def test_bilibili_service_returns_api_error_after_352_retries():
+    transport = FakeTransport(
+        [
+            json_response({"code": -352, "message": "risk control"}),
+            json_response({"code": -352, "message": "risk control"}),
+            json_response({"code": -352, "message": "risk control"}),
+        ]
+    )
+    service = BilibiliService(
+        BilibiliClient(
+            transport=transport,
+            max_attempts=3,
+            request_interval=0,
+            sleeper=lambda _: None,
+        )
+    )
+
+    with pytest.raises(BilibiliApiError, match="-352"):
+        service.fetch_danmaku(101, 1)
+
+    assert len(transport.calls) == 3
+
+
 def test_bilibili_client_retries_temporary_http_errors_only():
     transport = FakeTransport(
         [
@@ -423,6 +512,47 @@ def test_bv_export_reuses_ass_renderer_and_sanitizes_default_filename(tmp_path):
     assert result.metadata["source_type"] == "bv"
     assert result.metadata["cid"] == 101
     assert "from api" in (tmp_path / "result.ass").read_text(encoding="utf-8")
+
+
+def test_bv_default_filename_uses_page_only_for_multi_page_videos():
+    from danmukuflow.models import Danmaku
+
+    danmakus = [
+        Danmaku(
+            timeline_s=0,
+            content="from api",
+            type=DanmakuType.FLOAT,
+            fontsize=25,
+            rgb=(1, 2, 3),
+        )
+    ]
+
+    single_page = ExportService(StubBilibiliService(danmakus)).export(
+        ExportRequest(
+            source=BVSource("BV1", page=1),
+            output_config=OutputConfig(mode=OutputMode.DOWNLOAD),
+        )
+    )
+    assert single_page.artifact.filename == "A__ Demo.ass"
+
+    class MultiPageService(StubBilibiliService):
+        def resolve_video(self, source):
+            return Video(
+                bvid=source.bv,
+                title="A:/ Demo",
+                pages=[
+                    VideoPage(page=1, part="Part 1", cid=101, duration_s=1),
+                    VideoPage(page=2, part="Part 2", cid=102, duration_s=1),
+                ],
+            )
+
+    multi_page = ExportService(MultiPageService(danmakus)).export(
+        ExportRequest(
+            source=BVSource("BV1", page=2),
+            output_config=OutputConfig(mode=OutputMode.DOWNLOAD),
+        )
+    )
+    assert multi_page.artifact.filename == "A__ Demo-2.ass"
 
 
 def test_bv_page_not_found_and_ss_export_are_explicit():

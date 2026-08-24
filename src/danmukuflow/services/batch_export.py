@@ -8,6 +8,7 @@ from danmukuflow.models import (
     BatchItemResult,
     BatchItemStatus,
     ConflictPolicy,
+    DEFAULT_BATCH_NAMING_TEMPLATE,
     DEFAULT_CONCURRENCY,
     OutputConfig,
     SeasonSource,
@@ -66,7 +67,15 @@ class BatchExportService:
         return self._export_selected_episodes(season, request)
 
     def _export_local_videos(self, season, request):
-        selector = EpisodeSelector.from_spec(request.episodes)
+        selected_episode_ids = self._validated_selected_episode_ids(
+            season,
+            request.selected_episode_ids,
+        )
+        selector = (
+            EpisodeSelector.from_spec(request.episodes)
+            if selected_episode_ids is None
+            else None
+        )
         conflict_policy = self._conflict_policy(request.conflict_policy)
         videos = self.scanner.scan(request.video_dir)
         resolution = self.matcher.resolve(season.episodes, videos)
@@ -99,7 +108,11 @@ class BatchExportService:
         selected_matches = tuple(
             item
             for item in matches.matched
-            if selector.includes(item.episode.display_number)
+            if self._episode_selected(
+                item.episode,
+                selector,
+                selected_episode_ids,
+            )
         )
 
         fallback_episodes = self._fallback_episodes(
@@ -109,12 +122,17 @@ class BatchExportService:
             resolution,
             matched_ids,
             ambiguous_ids,
+            selected_episode_ids,
         )
         fallback_ids = {episode.episode_id for episode in fallback_episodes}
         selected_unmatched_episodes = tuple(
             item
             for item in matches.unmatched_episode
-            if selector.includes(item.episode.display_number)
+            if self._episode_selected(
+                item.episode,
+                selector,
+                selected_episode_ids,
+            )
             and item.episode.episode_id not in fallback_ids
         )
         items.extend(
@@ -193,21 +211,11 @@ class BatchExportService:
         output_config = request.output_config or OutputConfig(
             conflict_policy=self._conflict_policy(request.conflict_policy),
         )
-        if request.selected_episode_ids is not None:
-            selected_ids = tuple(int(item) for item in request.selected_episode_ids)
-            invalid_ids = [item for item in selected_ids if item < 1]
-            if invalid_ids:
-                raise InvalidEpisodeSelectionError(
-                    "episode ids must be greater than zero"
-                )
-            season_ids = {episode.episode_id for episode in season.episodes}
-            missing_ids = [item for item in selected_ids if item not in season_ids]
-            if missing_ids:
-                raise InvalidEpisodeSelectionError(
-                    "selected episode ids do not belong to this season: {}".format(
-                        ",".join(str(item) for item in missing_ids)
-                    )
-                )
+        selected_ids = self._validated_selected_episode_ids(
+            season,
+            request.selected_episode_ids,
+        )
+        if selected_ids is not None:
             episodes = tuple(
                 episode
                 for episode in season.episodes
@@ -231,7 +239,7 @@ class BatchExportService:
             plan = self.output_service.build_plan(
                 output_config,
                 context,
-                default_template="{season_title}/{episode_no}_{episode_title}_{episode_id}.ass",
+                default_template=DEFAULT_BATCH_NAMING_TEMPLATE,
                 default_root=default_root,
             )
             target_path = plan.target
@@ -371,14 +379,20 @@ class BatchExportService:
         resolution,
         matched_ids,
         ambiguous_ids,
+        selected_episode_ids=None,
     ):
         selectable = tuple(
             episode
             for episode in season.episodes
-            if episode.display_number is not None
-            and selector.includes(episode.display_number)
+            if self._episode_selected(
+                episode,
+                selector,
+                selected_episode_ids,
+            )
         )
         if selection_spec is None:
+            if selected_episode_ids is not None and not selectable:
+                return ()
             if not resolution.fallback_mode:
                 return ()
             return (_first_episode(selectable, season),)
@@ -391,6 +405,35 @@ class BatchExportService:
             if episode.episode_id not in matched_ids
             and episode.episode_id not in ambiguous_ids
         )
+
+    @staticmethod
+    def _episode_selected(episode, selector, selected_episode_ids):
+        if selected_episode_ids is not None:
+            return episode.episode_id in selected_episode_ids
+        return (
+            episode.display_number is not None
+            and selector.includes(episode.display_number)
+        )
+
+    @staticmethod
+    def _validated_selected_episode_ids(season, selected_episode_ids):
+        if selected_episode_ids is None:
+            return None
+        selected_ids = tuple(int(item) for item in selected_episode_ids)
+        invalid_ids = [item for item in selected_ids if item < 1]
+        if invalid_ids:
+            raise InvalidEpisodeSelectionError(
+                "episode ids must be greater than zero"
+            )
+        season_ids = {episode.episode_id for episode in season.episodes}
+        missing_ids = [item for item in selected_ids if item not in season_ids]
+        if missing_ids:
+            raise InvalidEpisodeSelectionError(
+                "selected episode ids do not belong to this season: {}".format(
+                    ",".join(str(item) for item in missing_ids)
+                )
+            )
+        return selected_ids
 
     @staticmethod
     def _fallback_output_path(video_dir, season, episode):

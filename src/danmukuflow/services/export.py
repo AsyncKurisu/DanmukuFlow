@@ -235,12 +235,13 @@ class ExportService:
             "segment_count": 0,
             "skipped_due_to_newer_output": False,
         }
+        default_template = self._bv_default_template(video)
         skipped_artifact = self._preview_skip(
             request.output_path,
             request.output_config,
             context=context,
             default_root=Path.cwd(),
-            default_template="{video_title}.ass",
+            default_template=default_template,
             metadata=metadata,
         )
         if skipped_artifact is not None:
@@ -270,7 +271,7 @@ class ExportService:
             output_path=request.output_path,
             output_config=request.output_config,
             default_root=Path.cwd(),
-            default_template="{video_title}.ass",
+            default_template=default_template,
             context=context,
             metadata=metadata,
         )
@@ -472,6 +473,12 @@ class ExportService:
     def _episode_title(season, episode):
         episode_title = episode.title or episode.long_title or str(episode.episode_id)
         return "{} - {}".format(season.title, episode_title)
+
+    @staticmethod
+    def _bv_default_template(video):
+        if len(video.pages) <= 1:
+            return "{video_title}.ass"
+        return "{video_title}-{page}.ass"
 
 
 def safe_filename(value):

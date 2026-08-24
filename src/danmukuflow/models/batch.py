@@ -18,7 +18,8 @@ from danmukuflow.models.output import (
 from danmukuflow.models.sources import SeasonSource
 
 
-DEFAULT_CONCURRENCY = 3
+DEFAULT_CONCURRENCY = 1
+DEFAULT_BATCH_NAMING_TEMPLATE = "{season_title}-{episode_no}.ass"
 
 
 class LocalEpisodeKind(str, Enum):

@@ -28,7 +28,7 @@ from danmukuflow.services.errors import (
 class BilibiliService:
     VIDEO_URL = "https://api.bilibili.com/x/web-interface/view"
     SEASON_URL = "https://api.bilibili.com/pgc/view/web/season"
-    DANMAKU_URL = "http://api.bilibili.com/x/v2/dm/web/seg.so"
+    DANMAKU_URL = "https://api.bilibili.com/x/v2/dm/web/seg.so"
 
     def __init__(self, client=None):
         self.client = client or BilibiliClient()
