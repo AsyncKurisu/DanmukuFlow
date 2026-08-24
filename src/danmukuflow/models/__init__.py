@@ -16,6 +16,14 @@ from danmukuflow.models.batch import (
 from danmukuflow.models.bilibili import Episode, RawDanmaku, Season, Video, VideoPage
 from danmukuflow.models.config import RenderConfig
 from danmukuflow.models.danmaku import Danmaku, DanmakuType
+from danmukuflow.models.output import (
+    BatchItemResult,
+    OutputArtifact,
+    OutputConfig,
+    OutputMode,
+    OutputOrganizationMode,
+    TemplateContext,
+)
 from danmukuflow.models.sources import (
     BVSource,
     BilibiliIdentifier,
@@ -30,6 +38,7 @@ __all__ = [
     "BatchExportRequest",
     "BatchExportResult",
     "BatchItemStatus",
+    "BatchItemResult",
     "BilibiliIdentifier",
     "ConflictPolicy",
     "DirectoryEpisodeResolution",
@@ -44,8 +53,13 @@ __all__ = [
     "LocalEpisodeKind",
     "LocalVideoFile",
     "NumericField",
+    "OutputArtifact",
+    "OutputConfig",
+    "OutputMode",
+    "OutputOrganizationMode",
     "RawDanmaku",
     "RenderConfig",
+    "TemplateContext",
     "Season",
     "SeasonSource",
     "Video",

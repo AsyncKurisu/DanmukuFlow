@@ -1,6 +1,13 @@
 import pytest
 
-from danmukuflow.models import RenderConfig, SeasonSource, XMLSource
+from danmukuflow.models import (
+    ConflictPolicy,
+    OutputConfig,
+    OutputMode,
+    RenderConfig,
+    SeasonSource,
+    XMLSource,
+)
 from danmukuflow.services import (
     DanmakuContentError,
     ExportRequest,
@@ -11,6 +18,7 @@ from danmukuflow.services import (
     OutputWriteError,
     UnsupportedSourceError,
 )
+import danmukuflow.services.export as export_module
 
 
 def write_xml(path, content="hello"):
@@ -52,6 +60,34 @@ def test_export_service_converts_xml_with_specified_output_and_creates_parent(tm
 
     assert result.output_path == output_path
     assert output_path.exists()
+
+
+def test_export_service_skips_existing_output_before_rendering(monkeypatch, tmp_path):
+    xml_path = tmp_path / "input.xml"
+    output_path = tmp_path / "input.ass"
+    write_xml(xml_path)
+    output_path.write_text("existing", encoding="utf-8")
+
+    def fail_parse(path):
+        raise AssertionError("parse_xml should not run when output is skipped")
+
+    monkeypatch.setattr(export_module, "parse_xml", fail_parse)
+
+    result = ExportService().export(
+        ExportRequest(
+            source=XMLSource(xml_path),
+            output_config=OutputConfig(
+                output_dir=tmp_path,
+                conflict_policy=ConflictPolicy.SKIP,
+                mode=OutputMode.DIRECTORY,
+            ),
+        )
+    )
+
+    assert result.skipped is True
+    assert result.output_path == output_path
+    assert result.danmaku_count == 0
+    assert output_path.read_text(encoding="utf-8") == "existing"
 
 
 def test_export_service_maps_missing_input():

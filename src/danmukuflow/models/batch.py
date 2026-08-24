@@ -5,6 +5,16 @@ from typing import Optional, Tuple
 
 from danmukuflow.models.bilibili import Episode
 from danmukuflow.models.config import RenderConfig
+from danmukuflow.models.output import (
+    BatchExportResult,
+    BatchItemResult,
+    ConflictPolicy,
+    OutputConfig,
+    OutputMode,
+    OutputOrganizationMode,
+    OutputArtifact,
+    TemplateContext,
+)
 from danmukuflow.models.sources import SeasonSource
 
 
@@ -16,11 +26,6 @@ class LocalEpisodeKind(str, Enum):
     SPECIAL = "special"
     UNRECOGNIZED = "unrecognized"
     AMBIGUOUS = "ambiguous"
-
-
-class ConflictPolicy(str, Enum):
-    SKIP = "skip"
-    OVERWRITE = "overwrite"
 
 
 class BatchItemStatus(str, Enum):
@@ -80,37 +85,13 @@ class DirectoryEpisodeResolution:
 @dataclass(frozen=True)
 class BatchExportRequest:
     source: SeasonSource
-    video_dir: Path
+    video_dir: Optional[Path] = None
     episodes: Optional[str] = None
+    selected_episode_ids: Optional[Tuple[int, ...]] = None
     concurrency: int = DEFAULT_CONCURRENCY
     conflict_policy: ConflictPolicy = ConflictPolicy.SKIP
     render_config: RenderConfig = field(default_factory=RenderConfig)
+    output_config: Optional[OutputConfig] = None
 
 
-@dataclass(frozen=True)
-class BatchExportItem:
-    episode_id: Optional[int]
-    display_number: Optional[int]
-    episode_title: Optional[str]
-    local_video_path: Optional[Path]
-    output_path: Optional[Path]
-    status: BatchItemStatus
-    result: Optional[object] = None
-    error: Optional[BaseException] = None
-    reason: Optional[str] = None
-    fallback: bool = False
-
-
-@dataclass(frozen=True)
-class BatchExportResult:
-    total: int
-    matched: int
-    selected: int
-    succeeded: int
-    failed: int
-    skipped: int
-    unmatched_local: int
-    unmatched_episode: int
-    ambiguous: int
-    items: Tuple[BatchExportItem, ...] = ()
-    fallback: int = 0
+BatchExportItem = BatchItemResult
