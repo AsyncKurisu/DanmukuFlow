@@ -19,6 +19,7 @@ from danmukuflow.models import (
     Season,
     TemplateContext,
 )
+from danmukuflow.bilibili.credentials import BilibiliCredentials
 from danmukuflow.services import OutputPathEscapeError, OutputService
 from danmukuflow.web import create_app
 from danmukuflow.web.app import DirectoryPickerUnavailableError
@@ -26,6 +27,10 @@ from danmukuflow.web.app import DirectoryPickerUnavailableError
 
 class FakeBilibiliService:
     def __init__(self):
+        self.client = SimpleNamespace(
+            credentials=BilibiliCredentials(),
+            set_cookie=self._set_cookie,
+        )
         self.video = SimpleNamespace(
             bvid="BV1",
             title="Demo Video",
@@ -60,6 +65,9 @@ class FakeBilibiliService:
                 ),
             ],
         )
+
+    def _set_cookie(self, cookie):
+        self.client.credentials = BilibiliCredentials.from_cookie(cookie)
 
     def resolve_video(self, source):
         return self.video
@@ -204,6 +212,42 @@ def test_web_resolve_and_export_and_batch_download(tmp_path):
     batch_payload = batch.json()
     assert batch_payload["succeeded"] == 2
     assert len(batch_payload["items"]) == 2
+
+
+def test_web_bilibili_settings_persist_and_apply_cookie(tmp_path, monkeypatch):
+    env_path = tmp_path / ".env"
+    monkeypatch.setenv("DANMUKUFLOW_ENV_FILE", str(env_path))
+    service = FakeBilibiliService()
+    client = TestClient(create_app(bilibili_service=service))
+
+    assert client.get("/api/settings/bilibili").json() == {
+        "configured": False,
+        "cookie_count": 0,
+    }
+    response = client.put(
+        "/api/settings/bilibili",
+        json={"cookie": "SESSDATA=session; buvid3=device"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"configured": True, "cookie_count": 2}
+    assert service.client.credentials.cookie_header == (
+        "SESSDATA=session; buvid3=device"
+    )
+    assert "SESSDATA=session" in env_path.read_text(encoding="utf-8")
+
+
+def test_web_bilibili_settings_reject_invalid_cookie(tmp_path, monkeypatch):
+    monkeypatch.setenv("DANMUKUFLOW_ENV_FILE", str(tmp_path / ".env"))
+    client = TestClient(create_app(bilibili_service=FakeBilibiliService()))
+
+    response = client.put(
+        "/api/settings/bilibili",
+        json={"cookie": "bili_jct=csrf"},
+    )
+
+    assert response.status_code == 422
+    assert "SESSDATA" in response.json()["detail"]
 
 
 def test_web_directory_picker_returns_selected_path(tmp_path, monkeypatch):

@@ -10,6 +10,11 @@ const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, ""
 
 export type DirectoryKind = "output" | "video";
 
+export interface BilibiliSettings {
+  configured: boolean;
+  cookie_count: number;
+}
+
 export class ApiError extends Error {
   status: number;
   detail: string;
@@ -26,6 +31,20 @@ export class ApiError extends Error {
 
 function url(path: string): string {
   return `${API_BASE_URL}${path}`;
+}
+
+export async function getBilibiliSettings(): Promise<BilibiliSettings> {
+  const response = await fetch(url("/api/settings/bilibili"));
+  return (await parseResponse<BilibiliSettings>(response)) as BilibiliSettings;
+}
+
+export async function saveBilibiliCookie(cookie: string): Promise<BilibiliSettings> {
+  const response = await fetch(url("/api/settings/bilibili"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cookie }),
+  });
+  return (await parseResponse<BilibiliSettings>(response)) as BilibiliSettings;
 }
 
 function contentDispositionFilename(value: string | null): string {

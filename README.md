@@ -10,15 +10,13 @@ DanmukuFlow 用于将 Bilibili XML、BV 视频和番剧弹幕转换为 ASS 字�
 python -m pip install -e .
 ```
 
-项目要求 Python 3.8 或更高版本。Windows 用户可以使用自己的 Python 绝对路径执行命令，例如：
-
-```powershell
-C:\Users\Kurisu\AppData\Local\Programs\Python\Python311\python.exe -m pip install -e .
-```
+项目要求 Python 3.8 或更高版本。
 
 ## Bilibili Cookie 配置
 
-如果匿名请求遇到 Bilibili `-352` 风控错误，可以配置登录态 Cookie。
+如果匿名请求遇到 Bilibili `-352` 风控错误，可以配置完整登录态 Cookie。CLI 和 Web 使用同一个 `.env` 文件。
+
+### CLI
 
 1. 复制项目根目录的 `.env.example` 为 `.env`：
 
@@ -26,20 +24,17 @@ C:\Users\Kurisu\AppData\Local\Programs\Python\Python311\python.exe -m pip instal
    Copy-Item .env.example .env
    ```
 
-2. 在 `.env` 中填写浏览器 Cookie 对应字段：
+2. 从已登录的 `bilibili.com` 浏览器请求中复制完整 Cookie，并粘贴到 `.env`：
 
    ```dotenv
-   BILIBILI_SESSDATA=
-   BILIBILI_BILI_JCT=
-   BILIBILI_DEDEUSERID=
-   BILIBILI_DEDEUSERID_CKMD5=
-   BILIBILI_BUVID3=
-   BILIBILI_BUVID4=
-   BILIBILI_BILI_TICKET=
-   BILIBILI_BILI_TICKET_EXPIRES=
+   BILIBILI_COOKIE="SESSDATA=...; bili_jct=...; buvid3=..."
    ```
 
-3. 重启 CLI 或 FastAPI 服务使配置生效。
+3. 重新启动 CLI 使配置生效。
+
+### Web
+
+打开页面右上角的“设置”，粘贴同一份完整 Cookie 并点击“保存并应用”。服务会将 Cookie 写入同一个 `.env`，并立即刷新当前登录态，无需重启 FastAPI。
 
 程序启动时读取 `.env`。同名操作系统环境变量优先于 `.env`，也可以使用 `DANMUKUFLOW_ENV_FILE` 指定其他配置文件：
 
@@ -49,7 +44,7 @@ $env:DANMUKUFLOW_ENV_FILE = "C:\path\to\danmukuflow.env"
 
 `.env` 包含登录凭据，已被 `.gitignore` 忽略，不要提交或公开分享。程序不会通过 Web API 返回 Cookie，也不会将 Cookie 写入日志。
 
-未配置 Cookie 时仍可以进行匿名请求。Cookie、请求限速和退避重试不能保证永久绕过 Bilibili 风控。
+未配置 Cookie 时仍可以进行匿名请求。Cookie、请求限速和退避重试不能保证永久绕过 Bilibili 风控。Cookie 过期后，CLI 重新编辑 `.env`，Web 重新粘贴保存。
 
 ## CLI
 

@@ -342,7 +342,9 @@ def test_bilibili_client_adds_credentials_and_browser_headers():
     transport = FakeTransport([HttpResponse(status_code=200, content=b"ok")])
     client = BilibiliClient(
         transport=transport,
-        credentials=BilibiliCredentials(sessdata="session", bili_jct="csrf"),
+        credentials=BilibiliCredentials.from_cookie(
+            "SESSDATA=session; bili_jct=csrf"
+        ),
         request_interval=0,
         max_attempts=1,
     )
@@ -354,6 +356,18 @@ def test_bilibili_client_adds_credentials_and_browser_headers():
     )
     assert transport.calls[0]["headers"]["Referer"] == "https://www.bilibili.com/"
     assert transport.calls[0]["headers"]["Origin"] == "https://www.bilibili.com"
+
+
+def test_bilibili_client_can_update_cookie():
+    transport = FakeTransport([HttpResponse(status_code=200, content=b"ok")])
+    client = BilibiliClient(transport=transport, max_attempts=1, request_interval=0)
+
+    client.set_cookie("SESSDATA=new-session; buvid3=new-device")
+    client.get("https://example.test")
+
+    assert transport.calls[0]["headers"]["Cookie"] == (
+        "SESSDATA=new-session; buvid3=new-device"
+    )
 
 
 def test_bilibili_client_retries_352_with_backoff_then_succeeds():

@@ -76,6 +76,10 @@ class ResolveRequestSchema(BaseModel):
     page: Optional[int] = None
 
 
+class BilibiliCookieRequestSchema(BaseModel):
+    cookie: str
+
+
 class DirectorySelectRequestSchema(BaseModel):
     kind: Literal["output", "video"]
 

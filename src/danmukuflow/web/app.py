@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
+from danmukuflow.bilibili.credentials import write_cookie_to_env
 from danmukuflow.bilibili.service import BilibiliService
 from danmukuflow.models import (
     BVSource,
@@ -48,6 +49,7 @@ from danmukuflow.services import (
 )
 from danmukuflow.web.schemas import (
     BatchExportRequestSchema,
+    BilibiliCookieRequestSchema,
     DirectorySelectRequestSchema,
     ResolveRequestSchema,
     SingleExportRequestSchema,
@@ -102,6 +104,26 @@ def create_app(
     app.state.export_service = export_service
     app.state.batch_export_service = batch_export_service
     app.state.bilibili_service = bilibili_service
+
+    @app.get("/api/settings/bilibili")
+    async def bilibili_settings():
+        credentials = app.state.bilibili_service.client.credentials
+        return {
+            "configured": bool(credentials.cookie_header),
+            "cookie_count": credentials.cookie_count,
+        }
+
+    @app.put("/api/settings/bilibili")
+    async def update_bilibili_settings(request: BilibiliCookieRequestSchema):
+        try:
+            credentials = write_cookie_to_env(request.cookie)
+        except (OSError, ValueError) as exc:
+            return _error_response(422, str(exc))
+        app.state.bilibili_service.client.set_cookie(credentials.cookie)
+        return {
+            "configured": True,
+            "cookie_count": credentials.cookie_count,
+        }
 
     @app.post("/api/directories/select")
     async def select_directory(request: DirectorySelectRequestSchema):
