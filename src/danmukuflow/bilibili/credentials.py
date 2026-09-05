@@ -1,4 +1,6 @@
 import os
+import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional
@@ -6,28 +8,30 @@ from typing import Mapping, Optional
 from dotenv import dotenv_values
 
 
-_COOKIE_FIELDS = (
-    ("SESSDATA", "BILIBILI_SESSDATA"),
-    ("bili_jct", "BILIBILI_BILI_JCT"),
-    ("DedeUserID", "BILIBILI_DEDEUSERID"),
-    ("DedeUserID__ckMd5", "BILIBILI_DEDEUSERID_CKMD5"),
-    ("buvid3", "BILIBILI_BUVID3"),
-    ("buvid4", "BILIBILI_BUVID4"),
-    ("bili_ticket", "BILIBILI_BILI_TICKET"),
-    ("bili_ticket_expires", "BILIBILI_BILI_TICKET_EXPIRES"),
-)
+_COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_ENV_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+_LEGACY_KEYS = {
+    "BILIBILI_SESSDATA",
+    "BILIBILI_BILI_JCT",
+    "BILIBILI_DEDEUSERID",
+    "BILIBILI_DEDEUSERID_CKMD5",
+    "BILIBILI_BUVID3",
+    "BILIBILI_BUVID4",
+    "BILIBILI_BILI_TICKET",
+    "BILIBILI_BILI_TICKET_EXPIRES",
+}
 
 
 @dataclass(frozen=True)
 class BilibiliCredentials:
-    sessdata: str = ""
-    bili_jct: str = ""
-    dede_user_id: str = ""
-    dede_user_id_ckmd5: str = ""
-    buvid3: str = ""
-    buvid4: str = ""
-    bili_ticket: str = ""
-    bili_ticket_expires: str = ""
+    cookie: str = ""
+
+    @classmethod
+    def from_cookie(cls, cookie: str):
+        values = parse_cookie(cookie)
+        if not values.get("SESSDATA"):
+            raise ValueError("Bilibili Cookie must contain SESSDATA")
+        return cls(_serialize_cookie(values))
 
     @classmethod
     def from_env(
@@ -50,47 +54,100 @@ class BilibiliCredentials:
                 }
             )
         values.update(dict(os.environ if environ is None else environ))
-
-        return cls(
-            sessdata=_clean_value(values.get("BILIBILI_SESSDATA")),
-            bili_jct=_clean_value(values.get("BILIBILI_BILI_JCT")),
-            dede_user_id=_clean_value(values.get("BILIBILI_DEDEUSERID")),
-            dede_user_id_ckmd5=_clean_value(
-                values.get("BILIBILI_DEDEUSERID_CKMD5")
-            ),
-            buvid3=_clean_value(values.get("BILIBILI_BUVID3")),
-            buvid4=_clean_value(values.get("BILIBILI_BUVID4")),
-            bili_ticket=_clean_value(values.get("BILIBILI_BILI_TICKET")),
-            bili_ticket_expires=_clean_value(
-                values.get("BILIBILI_BILI_TICKET_EXPIRES")
-            ),
-        )
+        raw_cookie = values.get("BILIBILI_COOKIE")
+        if not raw_cookie:
+            return cls()
+        return cls.from_cookie(raw_cookie)
 
     @property
     def cookie_header(self):
-        fields = {
-            "BILIBILI_SESSDATA": self.sessdata,
-            "BILIBILI_BILI_JCT": self.bili_jct,
-            "BILIBILI_DEDEUSERID": self.dede_user_id,
-            "BILIBILI_DEDEUSERID_CKMD5": self.dede_user_id_ckmd5,
-            "BILIBILI_BUVID3": self.buvid3,
-            "BILIBILI_BUVID4": self.buvid4,
-            "BILIBILI_BILI_TICKET": self.bili_ticket,
-            "BILIBILI_BILI_TICKET_EXPIRES": self.bili_ticket_expires,
-        }
-        values = []
-        for cookie_name, env_name in _COOKIE_FIELDS:
-            value = fields[env_name]
-            if value:
-                values.append("{}={}".format(cookie_name, value))
-        return "; ".join(values)
+        return self.cookie
+
+    @property
+    def cookie_count(self):
+        return len(parse_cookie(self.cookie)) if self.cookie else 0
 
 
-def _clean_value(value):
-    value = "" if value is None else str(value).strip()
-    if "\r" in value or "\n" in value:
-        raise ValueError("Bilibili credential values cannot contain newlines")
-    return value
+def parse_cookie(cookie: str):
+    if cookie is None:
+        return {}
+    raw = str(cookie).strip()
+    if not raw:
+        return {}
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in raw):
+        raise ValueError("Bilibili Cookie contains invalid control characters")
+
+    values = {}
+    for item in raw.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        name, separator, value = item.partition("=")
+        name = name.strip()
+        value = value.strip()
+        if not separator or not name or not value or not _COOKIE_NAME.match(name):
+            raise ValueError("Bilibili Cookie contains an invalid item")
+        values[name] = value
+    return values
+
+
+def write_cookie_to_env(cookie: str, env_path: Optional[Path] = None, environ=None):
+    credentials = BilibiliCredentials.from_cookie(cookie)
+    path = _env_write_path(env_path, environ)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+    lines = existing.splitlines(keepends=True)
+    output = []
+    replaced = False
+    for line in lines:
+        match = _ENV_ASSIGNMENT.match(line)
+        if match and (
+            match.group(1) == "BILIBILI_COOKIE"
+            or match.group(1) in _LEGACY_KEYS
+        ):
+            if not replaced:
+                output.append("BILIBILI_COOKIE={}\n".format(_dotenv_quote(credentials.cookie)))
+                replaced = True
+            continue
+        output.append(line)
+    if not replaced:
+        if output and not output[-1].endswith(("\n", "\r")):
+            output.append("\n")
+        output.append("BILIBILI_COOKIE={}\n".format(_dotenv_quote(credentials.cookie)))
+
+    fd, temporary = tempfile.mkstemp(
+        prefix=".danmukuflow-",
+        suffix=".env",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write("".join(output))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    return credentials
+
+
+def _dotenv_quote(value):
+    return '"{}"'.format(value.replace("\\", "\\\\").replace('"', '\\"'))
+
+
+def _env_write_path(env_path, environ):
+    if env_path is not None:
+        return Path(env_path).expanduser().resolve()
+    configured = (os.environ if environ is None else environ).get("DANMUKUFLOW_ENV_FILE")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return _env_path_from_environment(environ) or (
+        Path(__file__).resolve().parents[3] / ".env"
+    )
 
 
 def _env_path_from_environment(environ):
@@ -107,3 +164,7 @@ def _env_path_from_environment(environ):
         if candidate.is_file():
             return candidate
     return None
+
+
+def _serialize_cookie(values):
+    return "; ".join("{}={}".format(name, value) for name, value in values.items())

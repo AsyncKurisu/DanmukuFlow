@@ -93,6 +93,17 @@ button:disabled {
   font-size: 12px;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-button {
+  min-height: 32px;
+  padding: 6px 11px;
+}
+
 .app-main {
   width: min(1120px, calc(100% - 32px));
   margin: 0 auto;
@@ -181,6 +192,24 @@ select {
   background: #101820;
   color: #eef4f7;
   padding: 8px 10px;
+}
+
+textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 120px;
+  border: 1px solid #3a4a56;
+  border-radius: 3px;
+  background: #101820;
+  color: #eef4f7;
+  padding: 8px 10px;
+  font: inherit;
+  line-height: 1.45;
+}
+
+textarea:focus {
+  outline: 2px solid #6dc0d7;
+  outline-offset: 2px;
 }
 
 input:focus,
@@ -374,6 +403,34 @@ input[type="file"] {
   margin: 0;
   border: 1px solid #2a3742;
   padding: 11px 13px;
+}
+
+.success-message {
+  border-color: #397e72;
+  background: #18352f;
+  color: #a8e1c8;
+}
+
+.settings-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: start center;
+  padding: 74px 16px 20px;
+  background: rgb(5 10 14 / 72%);
+}
+
+.settings-panel {
+  width: min(620px, 100%);
+  display: grid;
+  gap: 14px;
+  box-shadow: 0 18px 48px rgb(0 0 0 / 34%);
+}
+
+.settings-status {
+  margin: 0;
+  color: #c2d4dc;
 }
 
 .error-message {

@@ -2,9 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   exportBatch,
   exportSingle,
+  getBilibiliSettings,
   isDownloadResult,
   resolveInput,
   saveDownload,
+  saveBilibiliCookie,
   selectDirectory,
 } from "./client";
 
@@ -32,6 +34,27 @@ describe("web API client", () => {
 
     const init = fetchMock.mock.calls[0][1] as RequestInit;
     expect(JSON.parse(String(init.body))).toEqual({ input: "BV123", page: 2 });
+  });
+
+  it("reads and saves Bilibili settings", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({ configured: false, cookie_count: 0 }))
+      .mockResolvedValueOnce(jsonResponse({ configured: true, cookie_count: 2 }));
+
+    await expect(getBilibiliSettings()).resolves.toEqual({
+      configured: false,
+      cookie_count: 0,
+    });
+    await expect(saveBilibiliCookie("SESSDATA=session; buvid3=device")).resolves.toEqual({
+      configured: true,
+      cookie_count: 2,
+    });
+
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/settings/bilibili");
+    expect(JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body))).toEqual({
+      cookie: "SESSDATA=session; buvid3=device",
+    });
   });
 
   it("submits real selected episode ids for batch export", async () => {

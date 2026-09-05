@@ -136,6 +136,11 @@ class BilibiliClient:
         if self.credentials.cookie_header:
             self.headers["Cookie"] = self.credentials.cookie_header
 
+    def set_cookie(self, cookie):
+        """Update the Cookie header for requests made after this call."""
+        self.credentials = BilibiliCredentials.from_cookie(cookie)
+        self.headers["Cookie"] = self.credentials.cookie_header
+
     def get_json(self, url, params=None):
         response = self.get(url, params=params)
         try:
